@@ -1,5 +1,7 @@
 const { stmts } = require("../database/db");
 const config = require("../config");
+const logger = require("../utils/logger");
+const { getPermissions } = require("../utils/permissions");
 const { formatNumber } = require("../utils/helpers");
 const { checkMembership } = require("../middlewares/membership");
 const { sendVideoToUser } = require("./start");
@@ -8,8 +10,10 @@ const {
   buildCancelKeyboard,
   buildSponsorKeyboard,
   buildSponsorManageKeyboard,
+  buildAdminManageKeyboard,
 } = require("../utils/keyboard");
 const { adminState, resetAdminState } = require("./admin");
+
 
 /**
  * هندلر Callback Query ها
@@ -24,8 +28,10 @@ function registerCallbackHandler(bot) {
       return;
     }
 
-    // Admin buttons
-    if (ctx.from.id !== config.ADMIN_ID) {
+    // Admin permissions check
+    const perms = getPermissions(ctx.from.id);
+    if (!perms.isAdmin) {
+      logger.warn(`Unauthorized callback query attempt from ID: ${ctx.from.id}`);
       await ctx.answerCallbackQuery({ text: "⛔ دسترسی ندارید!" });
       return;
     }
@@ -35,32 +41,50 @@ function registerCallbackHandler(bot) {
         await handleStats(ctx);
         break;
       case "admin_videos":
+        if (!perms.canManageVideos) return ctx.answerCallbackQuery({ text: "⛔ دسترسی ندارید!" });
         await handleVideoList(ctx);
         break;
       case "admin_sponsors":
+        if (!perms.canManageSponsors) return ctx.answerCallbackQuery({ text: "⛔ دسترسی ندارید!" });
         await handleSponsorList(ctx);
         break;
       case "admin_broadcast":
+        if (!perms.canBroadcast) return ctx.answerCallbackQuery({ text: "⛔ دسترسی ندارید!" });
         await handleBroadcastStart(ctx);
         break;
       case "admin_delete_video":
+        if (!perms.canManageVideos) return ctx.answerCallbackQuery({ text: "⛔ دسترسی ندارید!" });
         await handleDeleteVideoStart(ctx);
         break;
+      case "admin_manage_admins":
+        if (!perms.isOwner) return ctx.answerCallbackQuery({ text: "⛔ فقط مالک دسترسی دارد!" });
+        await handleAdminList(ctx);
+        break;
+      case "add_admin_start":
+        if (!perms.isOwner) return ctx.answerCallbackQuery({ text: "⛔ فقط مالک دسترسی دارد!" });
+        await handleAddAdminStart(ctx);
+        break;
       case "admin_cancel":
-        await handleCancel(ctx);
+        await handleCancel(ctx, perms);
         break;
       case "admin_back":
-        await handleBack(ctx);
+        await handleBack(ctx, perms);
         break;
       case "add_sponsor":
+        if (!perms.canManageSponsors) return ctx.answerCallbackQuery({ text: "⛔ دسترسی ندارید!" });
         await handleAddSponsorStart(ctx);
         break;
       default:
         // Dynamic sponsor buttons
         if (data.startsWith("toggle_sponsor_")) {
+          if (!perms.canManageSponsors) return ctx.answerCallbackQuery({ text: "⛔ دسترسی ندارید!" });
           await handleToggleSponsor(ctx, data);
         } else if (data.startsWith("delete_sponsor_")) {
+          if (!perms.canManageSponsors) return ctx.answerCallbackQuery({ text: "⛔ دسترسی ندارید!" });
           await handleDeleteSponsor(ctx, data);
+        } else if (data.startsWith("delete_admin_")) {
+          if (!perms.isOwner) return ctx.answerCallbackQuery({ text: "⛔ فقط مالک دسترسی دارد!" });
+          await handleDeleteAdmin(ctx, data);
         }
     }
   });
@@ -71,19 +95,29 @@ async function handleCheckMembership(ctx, data) {
   const videoCode = data.replace("check_", "");
   const userId = ctx.from.id;
 
+  logger.info(`User ${userId} clicked "Check Membership" for video [${videoCode}]`);
   const { isMember, notJoined } = await checkMembership(ctx.api, userId);
 
   if (!isMember) {
+    logger.action(`User ${userId} still not joined ${notJoined.length} channels.`);
     const keyboard = buildSponsorKeyboard(notJoined, videoCode);
     await ctx.answerCallbackQuery({
       text: "❌ هنوز در همه کانال‌ها عضو نشدید!",
       show_alert: true,
     });
-    await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
+    try {
+      await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
+    } catch (editError) {
+      // Ignore "message is not modified" error from Telegram API
+      if (!editError.message?.includes("message is not modified")) {
+        logger.error("Error updating reply markup:", editError.message);
+      }
+    }
     return;
   }
 
   // Membership confirmed - send video
+  logger.success(`Membership confirmed for user ${userId}. Sending video [${videoCode}].`);
   await ctx.answerCallbackQuery({ text: "✅ عضویت تأیید شد!" });
   await ctx.deleteMessage();
 
@@ -95,6 +129,7 @@ async function handleCheckMembership(ctx, data) {
 
   await sendVideoToUser(ctx, video);
 }
+
 
 // Bot statistics
 async function handleStats(ctx) {
@@ -236,23 +271,80 @@ async function handleDeleteVideoStart(ctx) {
   );
 }
 
+// Admin list management (Owner only)
+async function handleAdminList(ctx) {
+  const admins = stmts.getAllAdmins.all();
+  await ctx.answerCallbackQuery();
+
+  const keyboard = buildAdminManageKeyboard(admins);
+  await ctx.editMessageText(
+    `👥 <b>مدیریت ادمین‌ها</b>\n\n` +
+      `📌 <b>راهنمای نشانه‌ها:</b>\n` +
+      `🎬 = مدیریت ویدیوها\n` +
+      `📢 = مدیریت اسپانسرها\n` +
+      `📣 = ارسال پیام همگانی (برودکست)\n\n` +
+      (admins.length === 0
+        ? "هیچ ادمین فرعی تعریف نشده است."
+        : `${formatNumber(admins.length)} ادمین ثبت شده است:`),
+    {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    }
+  );
+}
+
+// Start adding new admin (Owner only)
+async function handleAddAdminStart(ctx) {
+  adminState.current = "waiting_admin";
+  await ctx.answerCallbackQuery();
+  await ctx.editMessageText(
+    `➕ <b>افزودن ادمین جدید</b>\n\n` +
+      `لطفاً اطلاعات ادمین را به فرمت زیر ارسال کنید:\n\n` +
+      `<code>آیدی عددی | نام ادمین | سطح دسترسی (1 یا 2 یا 3)</code>\n\n` +
+      `<b>انواع سطح دسترسی:</b>\n` +
+      `<b>1</b> = فقط ارسال و حذف ویدیو\n` +
+      `<b>2</b> = فقط مدیریت اسپانسرها\n` +
+      `<b>3</b> = دسترسی کامل (ویدیو + اسپانسر + برودکست)\n\n` +
+      `<i>مثال:</i>\n` +
+      `<code>123456789 | علی | 1</code>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: buildCancelKeyboard(),
+    }
+  );
+}
+
+// Delete admin (Owner only)
+async function handleDeleteAdmin(ctx, data) {
+  const adminId = Number(data.replace("delete_admin_", ""));
+  stmts.deleteAdmin.run(adminId);
+  logger.info(`Admin ${adminId} removed by owner.`);
+
+  await ctx.answerCallbackQuery({ text: "🗑️ ادمین حذف شد!" });
+  await handleAdminList(ctx);
+}
+
 // Cancel operation
-async function handleCancel(ctx) {
+async function handleCancel(ctx, perms) {
   resetAdminState();
   await ctx.answerCallbackQuery({ text: "❌ لغو شد!" });
   await ctx.editMessageText("❌ عملیات لغو شد.", {
-    reply_markup: buildAdminKeyboard(),
+    reply_markup: buildAdminKeyboard(perms),
   });
 }
 
 // Return to main admin menu
-async function handleBack(ctx) {
+async function handleBack(ctx, perms) {
   resetAdminState();
   await ctx.answerCallbackQuery();
-  await ctx.editMessageText("🔧 <b>پنل مدیریت ربات</b>", {
-    parse_mode: "HTML",
-    reply_markup: buildAdminKeyboard(),
-  });
+  await ctx.editMessageText(
+    `🔧 <b>پنل مدیریت ربات</b>\nنقش: <b>${perms.isOwner ? "مالک اصلی (Owner)" : perms.name}</b>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: buildAdminKeyboard(perms),
+    }
+  );
 }
 
 module.exports = { registerCallbackHandler };
+

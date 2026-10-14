@@ -1,5 +1,7 @@
 const { stmts } = require("../database/db");
 const config = require("../config");
+const logger = require("../utils/logger");
+const { getPermissions } = require("../utils/permissions");
 const { generateVideoCode, formatNumber, buildDeepLink } = require("../utils/helpers");
 const {
   buildAdminKeyboard,
@@ -10,7 +12,7 @@ const {
 
 // Admin conversation state (simple state machine)
 const adminState = {
-  current: null, // null | 'waiting_video' | 'waiting_broadcast' | 'waiting_sponsor' | 'waiting_delete_code'
+  current: null, // null | 'waiting_video' | 'waiting_broadcast' | 'waiting_sponsor' | 'waiting_delete_code' | 'waiting_admin'
   data: {},
 };
 
@@ -28,18 +30,23 @@ function resetAdminState() {
 function registerAdminHandler(bot) {
   // /panel command
   bot.command("panel", async (ctx) => {
-    if (ctx.from.id !== config.ADMIN_ID) return;
+    const perms = getPermissions(ctx.from.id);
+    if (!perms.isAdmin) return;
 
     resetAdminState();
-    await ctx.reply("🔧 <b>پنل مدیریت ربات</b>", {
+    await ctx.reply(`🔧 <b>پنل مدیریت ربات</b>\nنقش: <b>${perms.isOwner ? "مالک اصلی (Owner)" : perms.name}</b>`, {
       parse_mode: "HTML",
-      reply_markup: buildAdminKeyboard(),
+      reply_markup: buildAdminKeyboard(perms),
     });
   });
 
   // /add command - start process to add a new video
   bot.command("add", async (ctx) => {
-    if (ctx.from.id !== config.ADMIN_ID) return;
+    const perms = getPermissions(ctx.from.id);
+    if (!perms.canManageVideos) {
+      await ctx.reply("⛔ شما دسترسی مدیریت ویدیوها را ندارید.");
+      return;
+    }
 
     adminState.current = "waiting_video";
     await ctx.reply(
@@ -55,7 +62,8 @@ function registerAdminHandler(bot) {
 
   // Receive video from admin
   bot.on("message:video", async (ctx) => {
-    if (ctx.from.id !== config.ADMIN_ID) return;
+    const perms = getPermissions(ctx.from.id);
+    if (!perms.canManageVideos) return;
     if (adminState.current !== "waiting_video") return;
 
     const fileId = ctx.message.video.file_id;
@@ -74,6 +82,8 @@ function registerAdminHandler(bot) {
 
     resetAdminState();
 
+    logger.success(`Video added by ${ctx.from.id} with code [${code}]`);
+
     await ctx.reply(
       `✅ <b>ویدیو با موفقیت ذخیره شد!</b>\n\n` +
         `📎 <b>کد ویدیو:</b> <code>${code}</code>\n` +
@@ -88,12 +98,17 @@ function registerAdminHandler(bot) {
     });
   });
 
-  // Receive text message from admin (broadcast / sponsor / delete)
+  // Receive text message from admin (broadcast / sponsor / delete / admin add)
   bot.on("message:text", async (ctx) => {
-    if (ctx.from.id !== config.ADMIN_ID) return;
+    const perms = getPermissions(ctx.from.id);
+    if (!perms.isAdmin) return;
 
     // Broadcast mode
     if (adminState.current === "waiting_broadcast") {
+      if (!perms.canBroadcast) {
+        await ctx.reply("⛔ دسترسی برودکست ندارید.");
+        return;
+      }
       const text = ctx.message.text;
       resetAdminState();
       await doBroadcast(ctx, text);
@@ -102,12 +117,20 @@ function registerAdminHandler(bot) {
 
     // Add sponsor mode
     if (adminState.current === "waiting_sponsor") {
+      if (!perms.canManageSponsors) {
+        await ctx.reply("⛔ دسترسی مدیریت اسپانسرها را ندارید.");
+        return;
+      }
       await handleAddSponsor(ctx);
       return;
     }
 
     // Delete video mode
     if (adminState.current === "waiting_delete_code") {
+      if (!perms.canManageVideos) {
+        await ctx.reply("⛔ دسترسی حذف ویدیو را ندارید.");
+        return;
+      }
       const code = ctx.message.text.trim();
       const video = stmts.getVideoByCode.get(code);
 
@@ -119,13 +142,92 @@ function registerAdminHandler(bot) {
       }
 
       stmts.deleteVideo.run(code);
+      logger.info(`Video [${code}] deleted by admin ${ctx.from.id}`);
       await ctx.reply(`✅ ویدیو با کد <code>${code}</code> حذف شد.`, {
         parse_mode: "HTML",
       });
       return;
     }
+
+    // Add new sub-admin mode (Only owner)
+    if (adminState.current === "waiting_admin") {
+      if (!perms.isOwner) {
+        await ctx.reply("⛔ فقط مالک اصلی اجازه افزودن ادمین دارد.");
+        return;
+      }
+      await handleAddAdminSubmit(ctx);
+      return;
+    }
   });
 }
+
+/**
+ * پردازش افزودن ادمین جدید
+ * فرمت: user_id | نام | سطح دسترسی (1, 2 یا 3)
+ * سطوح:
+ * 1: فقط مدیریت ویدیوها
+ * 2: فقط مدیریت اسپانسرها
+ * 3: دسترسی کامل (ویدیو + اسپانسر + برودکست)
+ */
+async function handleAddAdminSubmit(ctx) {
+  const parts = ctx.message.text.split("|").map((s) => s.trim());
+  if (parts.length < 2) {
+    await ctx.reply(
+      "❌ لطفاً فرمت را رعایت کنید:\n\n" +
+        "<code>آیدی عددی | نام | نوع دسترسی (1 یا 2 یا 3)</code>\n\n" +
+        "<b>انواع دسترسی:</b>\n" +
+        "1 = فقط ویدیوها\n" +
+        "2 = فقط اسپانسرها\n" +
+        "3 = مدیر کل (ویدیو + اسپانسر + برودکست)\n\n" +
+        "<i>مثال:</i>\n<code>123456789 | علی | 1</code>",
+      { parse_mode: "HTML", reply_markup: buildCancelKeyboard() }
+    );
+    return;
+  }
+
+  const userId = Number(parts[0]);
+  const name = parts[1];
+  const level = parts[2] ? parts[2] : "1";
+
+  if (isNaN(userId)) {
+    await ctx.reply("❌ آیدی عددی کاربر نامعتبر است!");
+    return;
+  }
+
+  let canVideos = 0, canSponsors = 0, canBroadcast = 0;
+  if (level === "1") {
+    canVideos = 1;
+  } else if (level === "2") {
+    canSponsors = 1;
+  } else if (level === "3") {
+    canVideos = 1;
+    canSponsors = 1;
+    canBroadcast = 1;
+  } else {
+    canVideos = 1;
+  }
+
+  stmts.upsertAdmin.run({
+    user_id: userId,
+    name: name,
+    can_manage_videos: canVideos,
+    can_manage_sponsors: canSponsors,
+    can_broadcast: canBroadcast,
+  });
+
+  resetAdminState();
+  logger.success(`Admin ${userId} (${name}) registered with level ${level}`);
+
+  await ctx.reply(
+    `✅ ادمین <b>${name}</b> با موفقیت ذخیره شد!\n\n` +
+      `👤 شناسه: <code>${userId}</code>\n` +
+      `🎬 مدیریت ویدیو: ${canVideos ? "✅" : "❌"}\n` +
+      `📢 مدیریت اسپانسر: ${canSponsors ? "✅" : "❌"}\n` +
+      `📣 برودکست: ${canBroadcast ? "✅" : "❌"}`,
+    { parse_mode: "HTML" }
+  );
+}
+
 
 /**
  * پردازش اضافه کردن اسپانسر

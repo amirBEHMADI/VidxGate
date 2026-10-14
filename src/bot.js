@@ -1,23 +1,36 @@
 const { Bot } = require("grammy");
 const config = require("./config");
+const logger = require("./utils/logger");
 const { registerStartHandler } = require("./handlers/start");
 const { registerAdminHandler } = require("./handlers/admin");
 const { registerCallbackHandler } = require("./handlers/callbacks");
 
 // Check bot token
 if (!config.BOT_TOKEN) {
-  console.error("BOT_TOKEN is not configured! Please check your .env file.");
+  logger.error("BOT_TOKEN is not configured! Please check your .env file.");
   process.exit(1);
 }
 
 // Initialize bot instance
 const bot = new Bot(config.BOT_TOKEN);
 
+// Global logging middleware for updates
+bot.use(async (ctx, next) => {
+  const from = ctx.from ? `${ctx.from.first_name} (@${ctx.from.username || "no_user"}, ID: ${ctx.from.id})` : "Unknown";
+  if (ctx.message?.text) {
+    logger.info(`Received text: "${ctx.message.text}" from ${from}`);
+  } else if (ctx.message?.video) {
+    logger.info(`Received video from ${from}`);
+  } else if (ctx.callbackQuery) {
+    logger.info(`Received callback: "${ctx.callbackQuery.data}" from ${from}`);
+  }
+  await next();
+});
+
 // Error handler
 bot.catch((err) => {
   const ctx = err.ctx;
-  console.error(`Error handling update ${ctx.update.update_id}:`);
-  console.error(err.error);
+  logger.error(`Error handling update ${ctx.update.update_id}:`, err.error);
 });
 
 // Register handlers
@@ -29,10 +42,10 @@ registerCallbackHandler(bot);
 bot.start({
   onStart: (botInfo) => {
     console.log("======================================");
-    console.log(`Bot @${botInfo.username} is active!`);
-    console.log(`Admin ID: ${config.ADMIN_ID}`);
-    console.log(`Channel ID: ${config.MAIN_CHANNEL_ID}`);
-    console.log(`Video delete delay: ${config.VIDEO_DELETE_DELAY} seconds`);
+    logger.success(`Bot @${botInfo.username} is active!`);
+    logger.info(`Admin ID: ${config.ADMIN_ID}`);
+    logger.info(`Channel ID: ${config.MAIN_CHANNEL_ID}`);
+    logger.info(`Video delete delay: ${config.VIDEO_DELETE_DELAY} seconds`);
     console.log("======================================");
   },
 });
@@ -41,8 +54,9 @@ bot.start({
 const stopSignals = ["SIGINT", "SIGTERM"];
 stopSignals.forEach((signal) => {
   process.on(signal, () => {
-    console.log(`\nReceived ${signal}. Shutting down bot gracefully...`);
+    logger.warn(`Received ${signal}. Shutting down bot gracefully...`);
     bot.stop();
     process.exit(0);
   });
 });
+

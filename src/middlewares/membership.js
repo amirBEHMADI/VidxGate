@@ -1,4 +1,5 @@
 const { stmts } = require("../database/db");
+const logger = require("../utils/logger");
 
 /**
  * میدلور بررسی عضویت در کانال‌های اسپانسر
@@ -10,6 +11,7 @@ async function checkMembership(api, userId) {
   const sponsors = stmts.getActiveSponsors.all();
 
   if (sponsors.length === 0) {
+    logger.info(`No active sponsor channels found. Membership check passed for user ${userId}.`);
     return { isMember: true, notJoined: [] };
   }
 
@@ -18,6 +20,9 @@ async function checkMembership(api, userId) {
   for (const sponsor of sponsors) {
     try {
       const member = await api.getChatMember(sponsor.channel_id, userId);
+      logger.info(
+        `Checking sponsor ${sponsor.channel_name} (${sponsor.channel_id}) for user ${userId}: status = "${member.status}"`
+      );
 
       // Allowed statuses: member, administrator, creator
       const allowedStatuses = ["member", "administrator", "creator"];
@@ -25,9 +30,8 @@ async function checkMembership(api, userId) {
         notJoined.push(sponsor);
       }
     } catch (error) {
-      // If the bot does not have access or an error occurs, skip or treat as not joined
-      console.error(
-        `Error checking membership for channel ${sponsor.channel_name}:`,
+      logger.error(
+        `Error checking membership for channel ${sponsor.channel_name} (${sponsor.channel_id}):`,
         error.message
       );
       // Assume user is not a member
@@ -42,3 +46,4 @@ async function checkMembership(api, userId) {
 }
 
 module.exports = { checkMembership };
+

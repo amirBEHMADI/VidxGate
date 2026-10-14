@@ -32,19 +32,65 @@ function buildChannelPostKeyboard(botUsername, videoCode) {
 }
 
 /**
- * ساخت کیبورد پنل ادمین
+ * ساخت کیبورد پنل ادمین بر اساس دسترسی
+ * @param {{isOwner: boolean, canManageVideos: boolean, canManageSponsors: boolean, canBroadcast: boolean}} perms
  * @returns {InlineKeyboard}
  */
-function buildAdminKeyboard() {
-  return new InlineKeyboard()
-    .text("📊 آمار", "admin_stats")
-    .text("📋 لیست ویدیوها", "admin_videos")
-    .row()
-    .text("📢 مدیریت اسپانسرها", "admin_sponsors")
-    .text("📣 برودکست", "admin_broadcast")
-    .row()
-    .text("🗑️ حذف ویدیو", "admin_delete_video");
+function buildAdminKeyboard(perms = { isOwner: true, canManageVideos: true, canManageSponsors: true, canBroadcast: true }) {
+  const keyboard = new InlineKeyboard();
+
+  keyboard.text("📊 آمار", "admin_stats");
+  if (perms.canManageVideos) {
+    keyboard.text("📋 لیست ویدیوها", "admin_videos");
+  }
+  keyboard.row();
+
+  if (perms.canManageSponsors) {
+    keyboard.text("📢 مدیریت اسپانسرها", "admin_sponsors");
+  }
+  if (perms.canBroadcast) {
+    keyboard.text("📣 برودکست", "admin_broadcast");
+  }
+  keyboard.row();
+
+  if (perms.canManageVideos) {
+    keyboard.text("🗑️ حذف ویدیو", "admin_delete_video");
+  }
+
+  // Only Owner can manage sub-admins
+  if (perms.isOwner) {
+    keyboard.text("👥 مدیریت ادمین‌ها", "admin_manage_admins");
+  }
+
+  return keyboard;
 }
+
+/**
+ * ساخت کیبورد مدیریت ادمین‌ها
+ * @param {Array} admins
+ * @returns {InlineKeyboard}
+ */
+function buildAdminManageKeyboard(admins) {
+  const keyboard = new InlineKeyboard();
+
+  for (const a of admins) {
+    const roles = [];
+    if (a.can_manage_videos) roles.push("🎬");
+    if (a.can_manage_sponsors) roles.push("📢");
+    if (a.can_broadcast) roles.push("📣");
+
+    keyboard
+      .text(`${a.name || a.user_id} [${roles.join(" ")}]`, `admin_detail_${a.user_id}`)
+      .text("🗑️", `delete_admin_${a.user_id}`)
+      .row();
+  }
+
+  keyboard.text("➕ افزودن ادمین جدید", "add_admin_start").row();
+  keyboard.text("🔙 بازگشت", "admin_back");
+
+  return keyboard;
+}
+
 
 /**
  * ساخت کیبورد لغو عملیات
@@ -85,4 +131,6 @@ module.exports = {
   buildAdminKeyboard,
   buildCancelKeyboard,
   buildSponsorManageKeyboard,
+  buildAdminManageKeyboard,
 };
+

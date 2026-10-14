@@ -47,6 +47,15 @@ db.exec(`
     downloaded_at DATETIME DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(user_id)
   );
+
+  CREATE TABLE IF NOT EXISTS admins (
+    user_id       INTEGER PRIMARY KEY,
+    name          TEXT DEFAULT '',
+    can_manage_videos   INTEGER DEFAULT 1,
+    can_manage_sponsors INTEGER DEFAULT 0,
+    can_broadcast       INTEGER DEFAULT 0,
+    added_at      DATETIME DEFAULT (datetime('now'))
+  );
 `);
 
 // Prepared statements
@@ -107,6 +116,24 @@ const stmts = {
   `),
 
   getTotalDownloads: db.prepare(`SELECT COUNT(*) as count FROM download_log`),
+
+  // Admins
+  upsertAdmin: db.prepare(`
+    INSERT INTO admins (user_id, name, can_manage_videos, can_manage_sponsors, can_broadcast)
+    VALUES (@user_id, @name, @can_manage_videos, @can_manage_sponsors, @can_broadcast)
+    ON CONFLICT(user_id) DO UPDATE SET
+      name = @name,
+      can_manage_videos = @can_manage_videos,
+      can_manage_sponsors = @can_manage_sponsors,
+      can_broadcast = @can_broadcast
+  `),
+
+  getAdmin: db.prepare(`SELECT * FROM admins WHERE user_id = ?`),
+
+  getAllAdmins: db.prepare(`SELECT * FROM admins ORDER BY added_at DESC`),
+
+  deleteAdmin: db.prepare(`DELETE FROM admins WHERE user_id = ?`),
 };
 
 module.exports = { db, stmts };
+
