@@ -1,0 +1,413 @@
+const { stmts } = require("../database/db");
+const config = require("../config");
+const logger = require("../utils/logger");
+const { getPermissions } = require("../utils/permissions");
+const { generateVideoCode, formatNumber } = require("../utils/helpers");
+const {
+  buildCancelKeyboard,
+  buildPostPreviewKeyboard,
+  buildChannelPostKeyboard,
+} = require("../utils/keyboard");
+const downloader = require("../utils/downloader");
+const uploader = require("../utils/uploader");
+
+// In-memory conversation state for each admin during post creation
+const postStates = new Map();
+
+/**
+ * Get current post creation state for an admin
+ */
+function getPostState(userId) {
+  return postStates.get(userId);
+}
+
+/**
+ * Reset and cleanup post creation state
+ */
+function resetPostState(userId) {
+  const state = postStates.get(userId);
+  if (state?.data?.tempFilePath) {
+    downloader.cleanupFile(state.data.tempFilePath);
+  }
+  postStates.delete(userId);
+}
+
+/**
+ * Send interactive post preview to admin
+ */
+async function sendPostPreview(ctx, state) {
+  const botInfo = await ctx.api.getMe();
+  const keyboard = buildPostPreviewKeyboard(botInfo.username, state.data.code);
+
+  const previewNotice =
+    `<b>پیش‌نمایش پست کانال</b>\n` +
+    `--------------------\n` +
+    `${state.data.caption}\n` +
+    `--------------------\n` +
+    `<i>کد ثبت ویدیو:</i> <code>${state.data.code}</code>\n` +
+    `<i>وضعیت ویدیو:</i> ذخیره شده در آرشیو (تایید شد)`;
+
+  await ctx.replyWithPhoto(state.data.photoFileId, {
+    caption: previewNotice,
+    parse_mode: "HTML",
+    reply_markup: keyboard,
+  });
+
+  state.step = "preview";
+}
+
+/**
+ * Register automated channel post handlers
+ */
+function registerPostHandler(bot) {
+  // Command /post
+  bot.command("post", async (ctx) => {
+    const userId = ctx.from.id;
+    const perms = getPermissions(userId);
+
+    if (!perms.canManageVideos) {
+      await ctx.reply("شما دسترسی مدیریت ویدیوها و ارسال پست را ندارید.");
+      return;
+    }
+
+    resetPostState(userId);
+    postStates.set(userId, {
+      step: "waiting_post_video",
+      data: {
+        code: generateVideoCode(),
+      },
+    });
+
+    await ctx.reply(
+      "<b>سیستم ایجاد پست خودکار کانال</b>\n\n" +
+        "<b>مرحله اول:</b> لطفاً <b>لینک ویدیو</b> را ارسال کنید.\n\n" +
+        "<i>پشتیبانی از:\n" +
+        "- watchporn.to\n" +
+        "- sxyprn.net (کیفیت کامل تا سقف ۲ گیگابایت)\n" +
+        "- لینک‌های مستقیم mp4 / mkv\n" +
+        "- یوتیوب و سایر پلتفرم‌ها</i>\n\n" +
+        "<i>همچنین می‌توانید خود فایل ویدیو را مستقیماً فوروارد یا ارسال کنید.</i>",
+      {
+        parse_mode: "HTML",
+        reply_markup: buildCancelKeyboard(),
+      }
+    );
+  });
+
+  // Callback from admin panel button
+  bot.callbackQuery("admin_post_start", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const userId = ctx.from.id;
+    const perms = getPermissions(userId);
+
+    if (!perms.canManageVideos) {
+      await ctx.reply("شما دسترسی مدیریت ویدیوها را ندارید.");
+      return;
+    }
+
+    resetPostState(userId);
+    postStates.set(userId, {
+      step: "waiting_post_video",
+      data: {
+        code: generateVideoCode(),
+      },
+    });
+
+    await ctx.reply(
+      "<b>سیستم ایجاد پست خودکار کانال</b>\n\n" +
+        "<b>مرحله اول:</b> لطفاً <b>لینک ویدیو</b> را ارسال کنید.\n\n" +
+        "<i>پشتیبانی از:\n" +
+        "- watchporn.to\n" +
+        "- sxyprn.net (کیفیت کامل تا سقف ۲ گیگابایت)\n" +
+        "- لینک‌های مستقیم mp4 / mkv\n" +
+        "- یوتیوب و سایر پلتفرم‌ها</i>",
+      {
+        parse_mode: "HTML",
+        reply_markup: buildCancelKeyboard(),
+      }
+    );
+  });
+
+  // Receive post photo manually from admin
+  bot.on("message:photo", async (ctx, next) => {
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+
+    if (!state || state.step !== "waiting_post_photo") {
+      return next();
+    }
+
+    // Capture highest resolution photo
+    const photo = ctx.message.photo[ctx.message.photo.length - 1];
+    state.data.photoFileId = photo.file_id;
+
+    // Use caption if provided with the photo
+    if (ctx.message.caption && ctx.message.caption.trim()) {
+      state.data.caption = ctx.message.caption.trim();
+      await sendPostPreview(ctx, state);
+      return;
+    }
+
+    state.step = "waiting_post_caption";
+    await ctx.reply(
+      "<b>تصویر با موفقیت دریافت شد!</b>\n\n" +
+        "<b>مرحله سوم:</b> لطفاً <b>متن کپشن پست</b> را بنویسید و ارسال کنید:\n\n" +
+        "<i>(می‌توانید عنوان ویدیو، توضیحات، آیدی چنل و هشتگ‌های دلخواه را قرار دهید)</i>",
+      {
+        parse_mode: "HTML",
+        reply_markup: buildCancelKeyboard(),
+      }
+    );
+  });
+
+  // Receive video directly from Telegram upload/forward
+  bot.on("message:video", async (ctx, next) => {
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+
+    if (!state || state.step !== "waiting_post_video") {
+      return next();
+    }
+
+    state.data.fileId = ctx.message.video.file_id;
+    state.data.videoTitle = ctx.message.caption || "Telegram Video";
+    state.step = "waiting_post_photo";
+
+    await ctx.reply(
+      "<b>ویدیو مستقیماً از تلگرام ثبت شد!</b>\n\n" +
+        "<b>مرحله دوم:</b> لطفاً <b>عکس یا بنر پست</b> را ارسال کنید.\n" +
+        "<i>(این عکس به عنوان پست نهایی در کانال قرار می‌گیرد)</i>",
+      {
+        parse_mode: "HTML",
+        reply_markup: buildCancelKeyboard(),
+      }
+    );
+  });
+
+  // Handle incoming text from admin during post creation
+  bot.on("message:text", async (ctx, next) => {
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+
+    if (!state) {
+      return next();
+    }
+
+    // Reset if a different command is issued
+    if (ctx.message.text.startsWith("/")) {
+      if (ctx.message.text !== "/post") {
+        resetPostState(userId);
+      }
+      return next();
+    }
+
+    // Step 1: Video URL submitted
+    if (state.step === "waiting_post_video") {
+      const url = ctx.message.text.trim();
+      if (!/^https?:\/\//i.test(url)) {
+        await ctx.reply("لطفاً یک لینک معتبر اینترنتی ارسال کنید (شروع با http یا https).");
+        return;
+      }
+
+      const statusMsg = await ctx.reply("<b>در حال اتصال و استخراج اطلاعات ویدیو...</b>", {
+        parse_mode: "HTML",
+      });
+
+      let lastStatusUpdate = 0;
+      const updateStatus = async (text) => {
+        const now = Date.now();
+        if (now - lastStatusUpdate > 2500) {
+          lastStatusUpdate = now;
+          try {
+            await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, text, {
+              parse_mode: "HTML",
+            });
+          } catch (_) {}
+        }
+      };
+
+      try {
+        await updateStatus("<b>در حال شروع دانلود ویدیو...</b>");
+
+        const downloadResult = await downloader.downloadVideo(
+          url,
+          config.TEMP_DIR,
+          async (percent, downloadedBytes, totalBytes) => {
+            const sizeStr = totalBytes ? ` (${(totalBytes / (1024 * 1024)).toFixed(1)} MB)` : "";
+            await updateStatus(`<b>در حال دانلود ویدیو:</b> ${percent}%${sizeStr}`);
+          }
+        );
+
+        state.data.tempFilePath = downloadResult.filePath;
+        state.data.videoTitle = downloadResult.title;
+        state.data.videoSize = downloadResult.size;
+
+        await updateStatus("<b>دانلود تکمیل شد! در حال آپلود به کانال آرشیو...</b>");
+
+        const uploadResult = await uploader.uploadVideoToStorage(
+          ctx.api,
+          downloadResult.filePath,
+          config.STORAGE_CHANNEL_ID,
+          async (percent) => {
+            await updateStatus(`<b>در حال آپلود ویدیو به تلگرام:</b> ${percent}%`);
+          }
+        );
+
+        state.data.fileId = uploadResult.fileId;
+
+        // Cleanup temporary video file from disk
+        downloader.cleanupFile(downloadResult.filePath);
+        state.data.tempFilePath = null;
+
+        try {
+          await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
+        } catch (_) {}
+
+        state.step = "waiting_post_photo";
+        await ctx.reply(
+          `<b>ویدیو با موفقیت دانلود و در آرشیو ثبت شد!</b>\n` +
+            `حجم: <b>${(downloadResult.size / (1024 * 1024)).toFixed(1)} MB</b>\n\n` +
+            `<b>مرحله دوم:</b> لطفاً <b>عکس یا بنر پست کانال</b> را ارسال کنید.\n` +
+            `<i>(ثامبنیل دستی طبق انتخاب شما روی کانال پست خواهد شد)</i>`,
+          {
+            parse_mode: "HTML",
+            reply_markup: buildCancelKeyboard(),
+          }
+        );
+      } catch (err) {
+        logger.error("Error in post download/upload:", err);
+        if (state.data.tempFilePath) {
+          downloader.cleanupFile(state.data.tempFilePath);
+        }
+        try {
+          await ctx.api.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            `<b>خطا در پردازش ویدیو:</b>\n<code>${err.message}</code>\n\nلطفاً لینک را بررسی کرده و مجدداً تلاش فرمایید.`,
+            { parse_mode: "HTML" }
+          );
+        } catch (_) {
+          await ctx.reply(`خطا: ${err.message}`);
+        }
+      }
+      return;
+    }
+
+    // Step 2: Post caption submitted
+    if (state.step === "waiting_post_caption") {
+      state.data.caption = ctx.message.text.trim();
+      await sendPostPreview(ctx, state);
+      return;
+    }
+
+    return next();
+  });
+
+  // Confirm and publish post to destination channel
+  bot.callbackQuery("post_confirm", async (ctx) => {
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+
+    if (!state || !state.data.fileId || !state.data.photoFileId) {
+      await ctx.answerCallbackQuery({ text: "اطلاعات پست یافت نشد یا منقضی شده است." });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: "در حال انتشار در کانال..." });
+
+    try {
+      // 1. Insert video record in SQLite database
+      stmts.insertVideo.run({
+        code: state.data.code,
+        file_id: state.data.fileId,
+        caption: state.data.caption || "",
+      });
+
+      // 2. Build channel inline keyboard button
+      const botInfo = await ctx.api.getMe();
+      const channelKeyboard = buildChannelPostKeyboard(botInfo.username, state.data.code);
+
+      // 3. Post photo + caption + inline button to destination channel
+      const channelMessage = await ctx.api.sendPhoto(
+        config.POST_CHANNEL_ID,
+        state.data.photoFileId,
+        {
+          caption: state.data.caption,
+          parse_mode: "HTML",
+          reply_markup: channelKeyboard,
+        }
+      );
+
+      const channelLink = String(config.POST_CHANNEL_ID).startsWith("-100")
+        ? `https://t.me/c/${String(config.POST_CHANNEL_ID).replace("-100", "")}/${channelMessage.message_id}`
+        : null;
+
+      logger.success(`Post published successfully to channel ${config.POST_CHANNEL_ID} for video [${state.data.code}]`);
+
+      await ctx.reply(
+        `<b>پست با موفقیت در کانال منتشر شد!</b>\n\n` +
+          `کد اختصاصی ویدیو: <code>${state.data.code}</code>\n` +
+          `لینک دریافت در ربات:\nhttps://t.me/${botInfo.username}?start=${state.data.code}\n` +
+          (channelLink ? `\nمشاهده پست در کانال: <a href="${channelLink}">کلیک کنید</a>` : ""),
+        { parse_mode: "HTML" }
+      );
+
+      resetPostState(userId);
+    } catch (err) {
+      logger.error("Error publishing post to channel:", err);
+      await ctx.reply(`خطا در ارسال پست به کانال:\n<code>${err.message}</code>`, {
+        parse_mode: "HTML",
+      });
+    }
+  });
+
+  // Re-edit caption from preview
+  bot.callbackQuery("post_edit_caption", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+
+    if (!state) return;
+    state.step = "waiting_post_caption";
+
+    await ctx.reply(
+      "<b>ویرایش کپشن:</b>\nلطفاً متن جدید کپشن را ارسال فرمایید:",
+      {
+        parse_mode: "HTML",
+        reply_markup: buildCancelKeyboard(),
+      }
+    );
+  });
+
+  // Change post photo from preview
+  bot.callbackQuery("post_change_photo", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+
+    if (!state) return;
+    state.step = "waiting_post_photo";
+
+    await ctx.reply(
+      "<b>تغییر تصویر پست:</b>\nلطفاً عکس جدید مورد نظرتان را ارسال کنید:",
+      {
+        parse_mode: "HTML",
+        reply_markup: buildCancelKeyboard(),
+      }
+    );
+  });
+
+  // Cancel post creation
+  bot.callbackQuery("post_cancel", async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "عملیات لغو شد." });
+    const userId = ctx.from.id;
+    resetPostState(userId);
+    await ctx.reply("عملیات ایجاد و ارسال پست لغو گردید.");
+  });
+}
+
+module.exports = {
+  registerPostHandler,
+  getPostState,
+  resetPostState,
+};

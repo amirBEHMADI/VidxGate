@@ -19,7 +19,7 @@ const { adminState, resetAdminState } = require("./admin");
  * هندلر Callback Query ها
  */
 function registerCallbackHandler(bot) {
-  bot.on("callback_query:data", async (ctx) => {
+  bot.on("callback_query:data", async (ctx, next) => {
     const data = ctx.callbackQuery.data;
 
     // Re-check membership (regular user)
@@ -85,6 +85,8 @@ function registerCallbackHandler(bot) {
         } else if (data.startsWith("delete_admin_")) {
           if (!perms.isOwner) return ctx.answerCallbackQuery({ text: "⛔ فقط مالک دسترسی دارد!" });
           await handleDeleteAdmin(ctx, data);
+        } else {
+          await next();
         }
     }
   });

@@ -7,11 +7,17 @@
     "start": "node src/bot.js",
     "dev": "node --watch src/bot.js"
   },
-  "keywords": ["telegram", "bot", "video", "educational"],
+  "keywords": [
+    "telegram",
+    "bot",
+    "video",
+    "educational"
+  ],
   "license": "MIT",
   "dependencies": {
     "better-sqlite3": "^11.7.0",
     "dotenv": "^16.4.7",
-    "grammy": "^1.35.0"
+    "grammy": "^1.35.0",
+    "telegram": "^2.26.22"
   }
 }

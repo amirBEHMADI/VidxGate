@@ -3,6 +3,7 @@ const config = require("./config");
 const logger = require("./utils/logger");
 const { registerStartHandler } = require("./handlers/start");
 const { registerAdminHandler } = require("./handlers/admin");
+const { registerPostHandler } = require("./handlers/post");
 const { registerCallbackHandler } = require("./handlers/callbacks");
 
 // Check bot token
@@ -35,8 +36,10 @@ bot.catch((err) => {
 
 // Register handlers
 registerStartHandler(bot);
+registerPostHandler(bot);
 registerAdminHandler(bot);
 registerCallbackHandler(bot);
+
 
 // Start bot polling
 bot.start({

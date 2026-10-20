@@ -39,11 +39,16 @@ function buildChannelPostKeyboard(botUsername, videoCode) {
 function buildAdminKeyboard(perms = { isOwner: true, canManageVideos: true, canManageSponsors: true, canBroadcast: true }) {
   const keyboard = new InlineKeyboard();
 
-  keyboard.text("📊 آمار", "admin_stats");
+  if (perms.canManageVideos) {
+    keyboard.text("پست خودکار جدید", "admin_post_start");
+  }
+  keyboard.text("📊 آمار", "admin_stats").row();
+
   if (perms.canManageVideos) {
     keyboard.text("📋 لیست ویدیوها", "admin_videos");
+    keyboard.text("🗑️ حذف ویدیو", "admin_delete_video");
+    keyboard.row();
   }
-  keyboard.row();
 
   if (perms.canManageSponsors) {
     keyboard.text("📢 مدیریت اسپانسرها", "admin_sponsors");
@@ -52,10 +57,6 @@ function buildAdminKeyboard(perms = { isOwner: true, canManageVideos: true, canM
     keyboard.text("📣 برودکست", "admin_broadcast");
   }
   keyboard.row();
-
-  if (perms.canManageVideos) {
-    keyboard.text("🗑️ حذف ویدیو", "admin_delete_video");
-  }
 
   // Only Owner can manage sub-admins
   if (perms.isOwner) {
@@ -125,6 +126,26 @@ function buildSponsorManageKeyboard(sponsors) {
   return keyboard;
 }
 
+/**
+ * Build post preview keyboard for admin confirmation before channel publishing
+ * @param {string} botUsername
+ * @param {string} videoCode
+ * @returns {InlineKeyboard}
+ */
+function buildPostPreviewKeyboard(botUsername, videoCode) {
+  const keyboard = new InlineKeyboard();
+
+  keyboard.url("دریافت ویدیو (پیش‌نمایش دکمه)", `https://t.me/${botUsername}?start=${videoCode}`).row();
+  keyboard.text("تأیید و ارسال به کانال", "post_confirm").row();
+  keyboard
+    .text("ویرایش متن", "post_edit_caption")
+    .text("تغییر عکس", "post_change_photo")
+    .row();
+  keyboard.text("انصراف و لغو", "post_cancel");
+
+  return keyboard;
+}
+
 module.exports = {
   buildSponsorKeyboard,
   buildChannelPostKeyboard,
@@ -132,5 +153,7 @@ module.exports = {
   buildCancelKeyboard,
   buildSponsorManageKeyboard,
   buildAdminManageKeyboard,
+  buildPostPreviewKeyboard,
 };
+
 

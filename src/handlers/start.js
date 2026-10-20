@@ -98,12 +98,23 @@ async function sendVideoToUser(ctx, video) {
       { parse_mode: "HTML" }
     );
 
-    // Send video
+    // Send video (support both standard file_id and GramJS msg:channelId:messageId)
     logger.info(`Sending video [${video.code}] to user ${userId}...`);
-    const sentVideo = await ctx.api.sendVideo(userId, video.file_id, {
-      caption: video.caption || "",
-      parse_mode: "HTML",
-    });
+    let sentVideo;
+    if (video.file_id && video.file_id.startsWith("msg:")) {
+      const parts = video.file_id.split(":");
+      const storageChannelId = parts[1];
+      const storageMessageId = Number(parts[2]);
+      sentVideo = await ctx.api.copyMessage(userId, storageChannelId, storageMessageId, {
+        caption: video.caption || "",
+        parse_mode: "HTML",
+      });
+    } else {
+      sentVideo = await ctx.api.sendVideo(userId, video.file_id, {
+        caption: video.caption || "",
+        parse_mode: "HTML",
+      });
+    }
     logger.success(`Video [${video.code}] successfully sent to user ${userId} (message_id: ${sentVideo.message_id}).`);
 
     // Increment view count and log download
