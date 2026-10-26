@@ -21,165 +21,15 @@ function getYtDlpPath() {
 /**
  * Detect URL type based on pattern
  * @param {string} url
- * @returns {"watchporn" | "sxyprn" | "direct" | "generic"}
+ * @returns {"direct" | "generic"}
  */
 function detectUrlType(url) {
   if (!url || typeof url !== "string") return "generic";
   const trimmed = url.trim();
 
-  if (/watchporn\.to/i.test(trimmed)) return "watchporn";
-  if (/sxyprn\.net/i.test(trimmed)) return "sxyprn";
   if (/\.(mp4|mkv|mov|webm|avi)(\?.*)?$/i.test(trimmed)) return "direct";
 
   return "generic";
-}
-
-/**
- * Extract direct video URL from watchporn.to
- * @param {string} pageUrl
- */
-async function extractWatchPorn(pageUrl) {
-  logger.info(`Extracting watchporn.to: ${pageUrl}`);
-  const response = await fetch(pageUrl, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch watchporn page: HTTP ${response.status}`);
-  }
-
-  const html = await response.text();
-
-  // Extract page title
-  const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-  let title = titleMatch ? titleMatch[1].replace(/\s*-\s*watchporn\.to.*/i, "").trim() : "WatchPorn Video";
-
-  // Extract 1080p and 720p stream links from flashvars
-  const videoAltMatch = html.match(/video_alt_url:\s*['"]([^'"]+)['"]/);
-  const videoMatch = html.match(/video_url:\s*['"]([^'"]+)['"]/);
-
-  const directUrl = (videoAltMatch && videoAltMatch[1]) || (videoMatch && videoMatch[1]);
-
-  if (!directUrl) {
-    throw new Error("Could not find video_url or video_alt_url in watchporn.to page");
-  }
-
-  return {
-    directUrl,
-    title,
-    headers: {
-      Referer: pageUrl,
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    },
-  };
-}
-
-/**
- * Sxyprn decryption helper functions
- */
-function ssut51(arg) {
-  const str = String(arg).replace(/[^0-9]/g, "");
-  let sut = 0;
-  for (let i = 0; i < str.length; i++) {
-    sut += parseInt(str.charAt(i), 10);
-  }
-  return sut;
-}
-
-function boo(ss, es, host) {
-  const b = Buffer.from(`${ss}-${host}-${es}`).toString("base64");
-  return b.replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, ".");
-}
-
-function preda(arg) {
-  arg[5] = (
-    parseInt(arg[5], 10) -
-    (parseInt(ssut51(arg[6]), 10) + parseInt(ssut51(arg[7]), 10))
-  ).toString();
-  return arg;
-}
-
-/**
- * Extract full quality video URL from sxyprn.net without a headless browser
- * @param {string} pageUrl
- */
-async function extractSxyPrn(pageUrl) {
-  logger.info(`Extracting sxyprn.net: ${pageUrl}`);
-  const response = await fetch(pageUrl, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch sxyprn page: HTTP ${response.status}`);
-  }
-
-  const html = await response.text();
-
-  // Extract page title
-  const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-  let title = titleMatch ? titleMatch[1].replace(/\s*on\s*SexyPorn.*/i, "").trim() : "SxyPrn Video";
-
-  // Extract vnfo data from vidsnfo element
-  const vnfoMatch = html.match(/data-vnfo='([^']+)'/i) || html.match(/data-vnfo="([^"]+)"/i);
-
-  if (!vnfoMatch) {
-    throw new Error("Could not find data-vnfo in sxyprn page");
-  }
-
-  let vnfoData;
-  try {
-    vnfoData = JSON.parse(vnfoMatch[1]);
-  } catch (err) {
-    throw new Error(`Failed to parse sxyprn data-vnfo JSON: ${err.message}`);
-  }
-
-  const keys = Object.keys(vnfoData);
-  if (!keys.length) {
-    throw new Error("sxyprn data-vnfo object is empty");
-  }
-
-  const rawSrc = vnfoData[keys[0]];
-  const host = "www.sxyprn.net";
-
-  const tmp = rawSrc.split("/");
-  tmp[1] += `5/${boo(ssut51(tmp[6]), ssut51(tmp[7]), host)}`;
-  const modified = preda(tmp);
-  const intermediateUrl = `https://${host}${modified.join("/")}`;
-
-  // Fetch location header (HTTP 302 to CDN)
-  const headRes = await fetch(intermediateUrl, {
-    method: "HEAD",
-    redirect: "manual",
-    headers: {
-      Referer: pageUrl,
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    },
-  });
-
-  let directUrl = headRes.headers.get("location");
-  if (!directUrl) {
-    directUrl = intermediateUrl;
-  } else if (directUrl.startsWith("//")) {
-    directUrl = `https:${directUrl}`;
-  }
-
-  return {
-    directUrl,
-    title,
-    headers: {
-      Referer: pageUrl,
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    },
-  };
 }
 
 /**
@@ -329,26 +179,6 @@ async function downloadVideo(url, tempDir, onProgress) {
 
   logger.info(`Detected link type: ${type} for ${url}`);
 
-  if (type === "watchporn") {
-    const extracted = await extractWatchPorn(url);
-    const result = await streamUrlToFile(extracted.directUrl, targetPath, extracted.headers, onProgress);
-    return {
-      filePath: result.filePath,
-      title: extracted.title,
-      size: result.size,
-    };
-  }
-
-  if (type === "sxyprn") {
-    const extracted = await extractSxyPrn(url);
-    const result = await streamUrlToFile(extracted.directUrl, targetPath, extracted.headers, onProgress);
-    return {
-      filePath: result.filePath,
-      title: extracted.title,
-      size: result.size,
-    };
-  }
-
   if (type === "direct") {
     const result = await streamUrlToFile(url, targetPath, {}, onProgress);
     return {
@@ -386,8 +216,6 @@ function cleanupFile(filePath) {
 
 module.exports = {
   detectUrlType,
-  extractWatchPorn,
-  extractSxyPrn,
   downloadVideo,
   streamUrlToFile,
   cleanupFile,

@@ -84,7 +84,11 @@ async function uploadVideoToStorage(botApi, filePath, channelId, onProgress) {
   const toUpload = new CustomFile(fileName, stats.size, filePath);
 
   let lastReportedPercent = 0;
-  const sentMessage = await client.sendFile(channelId, {
+  const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+  const timeoutPromise = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error("Upload timed out after 5 minutes")), UPLOAD_TIMEOUT_MS)
+  );
+  const uploadPromise = client.sendFile(channelId, {
     file: toUpload,
     videoNote: false,
     supportsStreaming: true,
@@ -97,6 +101,14 @@ async function uploadVideoToStorage(botApi, filePath, channelId, onProgress) {
       }
     },
   });
+  let sentMessage;
+  try {
+    sentMessage = await Promise.race([uploadPromise, timeoutPromise]);
+  } catch (err) {
+    logger.error("Video upload failed:", err);
+    if (onProgress) onProgress(0);
+    throw err;
+  }
 
   if (onProgress) onProgress(100);
   logger.success(`Upload complete via GramJS! Storage Message ID: ${sentMessage.id}`);

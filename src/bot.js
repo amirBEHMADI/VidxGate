@@ -5,6 +5,7 @@ const { registerStartHandler } = require("./handlers/start");
 const { registerAdminHandler } = require("./handlers/admin");
 const { registerPostHandler } = require("./handlers/post");
 const { registerCallbackHandler } = require("./handlers/callbacks");
+const { registerQueueHandler } = require("./handlers/queue");
 
 // Check bot token
 if (!config.BOT_TOKEN) {
@@ -39,6 +40,7 @@ registerStartHandler(bot);
 registerPostHandler(bot);
 registerAdminHandler(bot);
 registerCallbackHandler(bot);
+registerQueueHandler(bot);
 
 
 // Start bot polling

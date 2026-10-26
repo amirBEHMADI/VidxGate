@@ -56,6 +56,17 @@ db.exec(`
     can_broadcast       INTEGER DEFAULT 0,
     added_at      DATETIME DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS video_queue (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    code          TEXT UNIQUE NOT NULL,
+    temp_path     TEXT,
+    file_id       TEXT,
+    caption       TEXT DEFAULT '',
+    status        TEXT NOT NULL,
+    error_msg     TEXT,
+    created_at    DATETIME DEFAULT (datetime('now'))
+  );
 `);
 
 // Prepared statements
@@ -133,6 +144,30 @@ const stmts = {
   getAllAdmins: db.prepare(`SELECT * FROM admins ORDER BY added_at DESC`),
 
   deleteAdmin: db.prepare(`DELETE FROM admins WHERE user_id = ?`),
+
+  // Video queue for pending downloads/uploads
+  insertQueue: db.prepare(`
+    INSERT INTO video_queue (code, temp_path, status)
+    VALUES (@code, @temp_path, @status)
+  `),
+
+  getQueueByCode: db.prepare(`SELECT * FROM video_queue WHERE code = ?`),
+
+  updateQueueStatus: db.prepare(`UPDATE video_queue SET status = @status WHERE code = @code`),
+
+  setQueueFileId: db.prepare(`UPDATE video_queue SET file_id = @file_id, status = @status, temp_path = NULL WHERE code = @code`),
+
+  setQueueError: db.prepare(`UPDATE video_queue SET status = 'error', error_msg = @error_msg WHERE code = @code`),
+
+  deleteQueue: db.prepare(`DELETE FROM video_queue WHERE code = ?`),
+
+  getQueueByStatus: db.prepare(`SELECT * FROM video_queue WHERE status = ? ORDER BY created_at DESC`),
+
+  getAllQueue: db.prepare(`SELECT * FROM video_queue ORDER BY created_at DESC`),
+
+  getQueueCountByStatus: db.prepare(`SELECT status, COUNT(*) as count FROM video_queue GROUP BY status`),
+
+  updateQueueTempPath: db.prepare(`UPDATE video_queue SET temp_path = @temp_path WHERE code = @code`),
 };
 
 module.exports = { db, stmts };

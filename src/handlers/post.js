@@ -82,8 +82,6 @@ function registerPostHandler(bot) {
       "<b>سیستم ایجاد پست خودکار کانال</b>\n\n" +
         "<b>مرحله اول:</b> لطفاً <b>لینک ویدیو</b> را ارسال کنید.\n\n" +
         "<i>پشتیبانی از:\n" +
-        "- watchporn.to\n" +
-        "- sxyprn.net (کیفیت کامل تا سقف ۲ گیگابایت)\n" +
         "- لینک‌های مستقیم mp4 / mkv\n" +
         "- یوتیوب و سایر پلتفرم‌ها</i>\n\n" +
         "<i>همچنین می‌توانید خود فایل ویدیو را مستقیماً فوروارد یا ارسال کنید.</i>",
@@ -117,8 +115,6 @@ function registerPostHandler(bot) {
       "<b>سیستم ایجاد پست خودکار کانال</b>\n\n" +
         "<b>مرحله اول:</b> لطفاً <b>لینک ویدیو</b> را ارسال کنید.\n\n" +
         "<i>پشتیبانی از:\n" +
-        "- watchporn.to\n" +
-        "- sxyprn.net (کیفیت کامل تا سقف ۲ گیگابایت)\n" +
         "- لینک‌های مستقیم mp4 / mkv\n" +
         "- یوتیوب و سایر پلتفرم‌ها</i>",
       {
@@ -228,6 +224,8 @@ function registerPostHandler(bot) {
 
       try {
         await updateStatus("<b>در حال شروع دانلود ویدیو...</b>");
+        // Initialize queue entry for this video
+        stmts.insertQueue.run({ code: state.data.code, temp_path: null, status: 'downloading' });
 
         const downloadResult = await downloader.downloadVideo(
           url,
@@ -242,7 +240,14 @@ function registerPostHandler(bot) {
         state.data.videoTitle = downloadResult.title;
         state.data.videoSize = downloadResult.size;
 
+        // Update queue: download finished, save temp path
+        stmts.updateQueueStatus.run({ status: 'downloaded', code: state.data.code });
+        stmts.updateQueueTempPath.run({ temp_path: downloadResult.filePath, code: state.data.code });
+
         await updateStatus("<b>دانلود تکمیل شد! در حال آپلود به کانال آرشیو...</b>");
+
+        // Update queue: uploading
+        stmts.updateQueueStatus.run({ status: 'uploading', code: state.data.code });
 
         const uploadResult = await uploader.uploadVideoToStorage(
           ctx.api,
@@ -254,6 +259,9 @@ function registerPostHandler(bot) {
         );
 
         state.data.fileId = uploadResult.fileId;
+
+        // Update queue: upload finished
+        stmts.setQueueFileId.run({ file_id: uploadResult.fileId, status: 'uploaded', code: state.data.code });
 
         // Cleanup temporary video file from disk
         downloader.cleanupFile(downloadResult.filePath);
@@ -276,6 +284,8 @@ function registerPostHandler(bot) {
         );
       } catch (err) {
         logger.error("Error in post download/upload:", err);
+        // Update queue: error
+        stmts.setQueueError.run({ error_msg: err.message, code: state.data.code });
         if (state.data.tempFilePath) {
           downloader.cleanupFile(state.data.tempFilePath);
         }
