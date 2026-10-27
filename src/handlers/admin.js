@@ -9,6 +9,7 @@ const {
   buildChannelPostKeyboard,
   buildSponsorManageKeyboard,
 } = require("../utils/keyboard");
+const { syncUserCommands } = require("../utils/commands");
 
 // Admin conversation state (simple state machine)
 const adminState = {
@@ -33,6 +34,7 @@ function registerAdminHandler(bot) {
     const perms = getPermissions(ctx.from.id);
     if (!perms.isAdmin) return;
 
+    syncUserCommands(ctx.api, ctx.from.id);
     resetAdminState();
     await ctx.reply(`🔧 <b>پنل مدیریت ربات</b>\nنقش: <b>${perms.isOwner ? "مالک اصلی (Owner)" : perms.name}</b>`, {
       parse_mode: "HTML",
@@ -99,9 +101,14 @@ function registerAdminHandler(bot) {
   });
 
   // Receive text message from admin (broadcast / sponsor / delete / admin add)
-  bot.on("message:text", async (ctx) => {
+  bot.on("message:text", async (ctx, next) => {
+    // If incoming message is a command, pass through to command handlers
+    if (ctx.message.text.startsWith("/")) {
+      return next();
+    }
+
     const perms = getPermissions(ctx.from.id);
-    if (!perms.isAdmin) return;
+    if (!perms.isAdmin) return next();
 
     // Broadcast mode
     if (adminState.current === "waiting_broadcast") {
@@ -158,6 +165,8 @@ function registerAdminHandler(bot) {
       await handleAddAdminSubmit(ctx);
       return;
     }
+
+    return next();
   });
 }
 

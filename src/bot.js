@@ -6,6 +6,7 @@ const { registerAdminHandler } = require("./handlers/admin");
 const { registerPostHandler } = require("./handlers/post");
 const { registerCallbackHandler } = require("./handlers/callbacks");
 const { registerQueueHandler } = require("./handlers/queue");
+const { initDefaultCommands, syncUserCommands } = require("./utils/commands");
 
 // Check bot token
 if (!config.BOT_TOKEN) {
@@ -38,9 +39,9 @@ bot.catch((err) => {
 // Register handlers
 registerStartHandler(bot);
 registerPostHandler(bot);
+registerQueueHandler(bot);
 registerAdminHandler(bot);
 registerCallbackHandler(bot);
-registerQueueHandler(bot);
 
 
 // Start bot polling
@@ -52,6 +53,12 @@ bot.start({
     logger.info(`Channel ID: ${config.MAIN_CHANNEL_ID}`);
     logger.info(`Video delete delay: ${config.VIDEO_DELETE_DELAY} seconds`);
     console.log("======================================");
+
+    // Initialize scoped Telegram commands autocomplete
+    initDefaultCommands(bot.api);
+    if (config.ADMIN_ID) {
+      syncUserCommands(bot.api, config.ADMIN_ID);
+    }
   },
 });
 

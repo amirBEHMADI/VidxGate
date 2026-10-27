@@ -60,8 +60,10 @@ function buildAdminKeyboard(perms = { isOwner: true, canManageVideos: true, canM
 
   // Only Owner can manage sub-admins
   if (perms.isOwner) {
-    keyboard.text("👥 مدیریت ادمین‌ها", "admin_manage_admins");
+    keyboard.text("👥 مدیریت ادمین‌ها", "admin_manage_admins").row();
   }
+
+  keyboard.text("📋 راهنمای دستورات", "admin_commands_guide");
 
   return keyboard;
 }

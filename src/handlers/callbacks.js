@@ -1,5 +1,7 @@
+const { InlineKeyboard } = require("grammy");
 const { stmts } = require("../database/db");
 const config = require("../config");
+const { getAdminHelpMessage } = require("../utils/commands");
 const logger = require("../utils/logger");
 const { getPermissions } = require("../utils/permissions");
 const { formatNumber } = require("../utils/helpers");
@@ -69,6 +71,9 @@ function registerCallbackHandler(bot) {
         break;
       case "admin_back":
         await handleBack(ctx, perms);
+        break;
+      case "admin_commands_guide":
+        await handleCommandsGuide(ctx, perms);
         break;
       case "add_sponsor":
         if (!perms.canManageSponsors) return ctx.answerCallbackQuery({ text: "⛔ دسترسی ندارید!" });
@@ -346,6 +351,16 @@ async function handleBack(ctx, perms) {
       reply_markup: buildAdminKeyboard(perms),
     }
   );
+}
+
+// Show commands guide
+async function handleCommandsGuide(ctx, perms) {
+  await ctx.answerCallbackQuery();
+  const keyboard = new InlineKeyboard().text("🔙 بازگشت", "admin_back");
+  await ctx.editMessageText(getAdminHelpMessage(perms), {
+    parse_mode: "HTML",
+    reply_markup: keyboard,
+  });
 }
 
 module.exports = { registerCallbackHandler };

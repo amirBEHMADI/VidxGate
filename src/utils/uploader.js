@@ -84,16 +84,51 @@ async function uploadVideoToStorage(botApi, filePath, channelId, onProgress) {
   const toUpload = new CustomFile(fileName, stats.size, filePath);
 
   let lastReportedPercent = 0;
-  const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error("Upload timed out after 5 minutes")), UPLOAD_TIMEOUT_MS)
-  );
+  let lastActivityTime = Date.now();
+
+  // Dynamic max timeout: minimum 20 mins, or ~1 min per 20MB (e.g. 1500MB = 75 mins)
+  const maxTimeoutMinutes =
+    config.UPLOAD_TIMEOUT_MINUTES > 0
+      ? config.UPLOAD_TIMEOUT_MINUTES
+      : Math.max(20, Math.ceil(fileSizeMB / 20));
+  const maxTimeoutMs = maxTimeoutMinutes * 60 * 1000;
+
+  // Inactivity timeout: only fail if no progress received for 4 minutes
+  const STALL_TIMEOUT_MS = 4 * 60 * 1000;
+
+  let timerId = null;
+  let stallCheckInterval = null;
+
+  const timeoutPromise = new Promise((_, reject) => {
+    timerId = setTimeout(() => {
+      reject(
+        new Error(
+          `Upload timed out after exceeding total limit of ${maxTimeoutMinutes} minutes (${fileSizeMB.toFixed(1)} MB)`
+        )
+      );
+    }, maxTimeoutMs);
+
+    stallCheckInterval = setInterval(() => {
+      if (Date.now() - lastActivityTime > STALL_TIMEOUT_MS) {
+        reject(
+          new Error(
+            `Upload stalled: no progress received for ${(STALL_TIMEOUT_MS / 60000).toFixed(0)} minutes`
+          )
+        );
+      }
+    }, 15000);
+  });
+
+  const uploadWorkers = config.UPLOAD_WORKERS || 4;
+
   const uploadPromise = client.sendFile(channelId, {
     file: toUpload,
+    workers: uploadWorkers,
     videoNote: false,
     supportsStreaming: true,
     caption: `Archived via GramJS: ${fileName} (${fileSizeMB.toFixed(1)} MB)`,
     progressCallback: (progress) => {
+      lastActivityTime = Date.now();
       const currentPercent = Math.min(99, Math.round(progress * 100));
       if (currentPercent - lastReportedPercent >= 5 && onProgress) {
         lastReportedPercent = currentPercent;
@@ -101,6 +136,7 @@ async function uploadVideoToStorage(botApi, filePath, channelId, onProgress) {
       }
     },
   });
+
   let sentMessage;
   try {
     sentMessage = await Promise.race([uploadPromise, timeoutPromise]);
@@ -108,6 +144,9 @@ async function uploadVideoToStorage(botApi, filePath, channelId, onProgress) {
     logger.error("Video upload failed:", err);
     if (onProgress) onProgress(0);
     throw err;
+  } finally {
+    if (timerId) clearTimeout(timerId);
+    if (stallCheckInterval) clearInterval(stallCheckInterval);
   }
 
   if (onProgress) onProgress(100);

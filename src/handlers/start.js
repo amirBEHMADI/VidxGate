@@ -4,6 +4,12 @@ const { buildSponsorKeyboard } = require("../utils/keyboard");
 const { delay } = require("../utils/helpers");
 const logger = require("../utils/logger");
 const config = require("../config");
+const { getPermissions } = require("../utils/permissions");
+const {
+  syncUserCommands,
+  getAdminHelpMessage,
+  getUserHelpMessage,
+} = require("../utils/commands");
 
 /**
  * هندلر دستور /start
@@ -28,11 +34,19 @@ function registerStartHandler(bot) {
     // If opened without deep link, show welcome message
     if (!videoCode) {
       logger.info(`User ${userId} started bot without deep link.`);
+      const perms = getPermissions(userId);
+
+      // Sync custom Telegram autocomplete menu for admins
+      if (perms.isAdmin) {
+        syncUserCommands(ctx.api, userId);
+      }
+
       await ctx.reply(
         `سلام ${firstName} عزیز! 👋\n\n` +
           `🎓 به ربات ویدیوهای آموزشی خوش اومدی!\n\n` +
           `📌 برای دریافت ویدیوها، روی لینک‌های کانال کلیک کن.\n\n` +
-          `💡 هر ویدیو فقط ۳۰ ثانیه قابل مشاهده‌ست، پس سریع ذخیره کن!`,
+          `💡 هر ویدیو فقط ۳۰ ثانیه قابل مشاهده‌ست، پس سریع ذخیره کن!` +
+          (perms.isAdmin ? `\n\n<i>شما به عنوان مدیر شناسایی شدید. برای مشاهده پنل دستور /panel یا راهنما /help را ارسال نمایید.</i>` : ""),
         { parse_mode: "HTML" }
       );
       return;
@@ -81,6 +95,20 @@ function registerStartHandler(bot) {
     logger.success(`Membership verified for user ${userId}. Delivering video [${videoCode}]...`);
     // Send video to user
     await sendVideoToUser(ctx, video);
+  });
+
+  // /help command (role-aware guide)
+  bot.command(["help", "commands"], async (ctx) => {
+    const userId = ctx.from.id;
+    const perms = getPermissions(userId);
+
+    if (perms.isAdmin) {
+      // Sync admin command autocomplete menu
+      syncUserCommands(ctx.api, userId);
+      await ctx.reply(getAdminHelpMessage(perms), { parse_mode: "HTML" });
+    } else {
+      await ctx.reply(getUserHelpMessage(), { parse_mode: "HTML" });
+    }
   });
 }
 

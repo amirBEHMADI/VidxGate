@@ -29,5 +29,9 @@ module.exports = {
 
   // Daily download limit (0 = unlimited)
   DAILY_LIMIT: Number(process.env.DAILY_LIMIT) || 0,
+
+  // GramJS upload settings
+  UPLOAD_TIMEOUT_MINUTES: Number(process.env.UPLOAD_TIMEOUT_MINUTES) || 0,
+  UPLOAD_WORKERS: Number(process.env.UPLOAD_WORKERS) || 4,
 };
 
