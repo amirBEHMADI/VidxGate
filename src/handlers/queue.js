@@ -9,6 +9,7 @@ const STATUS_LABELS = {
   uploading: "در حال آپلود",
   uploaded: "آپلود شده",
   error: "خطا",
+  cancelled: "لغو شده",
 };
 
 /**

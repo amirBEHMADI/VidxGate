@@ -2,11 +2,18 @@ const { stmts } = require("../database/db");
 const config = require("../config");
 const logger = require("../utils/logger");
 const { getPermissions } = require("../utils/permissions");
-const { generateVideoCode, formatNumber } = require("../utils/helpers");
+const {
+  generateVideoCode,
+  formatNumber,
+  formatProgressBar,
+  formatBytes,
+} = require("../utils/helpers");
 const {
   buildCancelKeyboard,
   buildPostPreviewKeyboard,
   buildChannelPostKeyboard,
+  buildQualityKeyboard,
+  buildActiveCancelKeyboard,
 } = require("../utils/keyboard");
 const downloader = require("../utils/downloader");
 const uploader = require("../utils/uploader");
@@ -27,6 +34,11 @@ function getPostState(userId) {
  */
 function resetPostState(userId) {
   const state = postStates.get(userId);
+  if (state?.abortController) {
+    try {
+      state.abortController.abort();
+    } catch (_) {}
+  }
   if (state?.data?.tempFilePath) {
     downloader.cleanupFile(state.data.tempFilePath);
   }
@@ -55,6 +67,144 @@ async function sendPostPreview(ctx, state) {
   });
 
   state.step = "preview";
+}
+
+/**
+ * Handle video download and upload pipeline with progress reporting and cancellation support
+ */
+async function processVideoDownloadAndUpload(ctx, state, statusMsg, downloadOptions = {}) {
+  const abortController = new AbortController();
+  state.abortController = abortController;
+  state.data.statusMessageId = statusMsg.message_id;
+
+  let lastStatusUpdate = 0;
+  const updateProgressMessage = async (stageText, percent, currentBytes, totalBytes) => {
+    if (abortController.signal.aborted) return;
+    const now = Date.now();
+    // Throttle UI updates to 1.5s
+    if (now - lastStatusUpdate < 1500 && percent < 100 && percent > 0) {
+      return;
+    }
+    lastStatusUpdate = now;
+
+    const safePercent = Math.min(100, Math.max(0, percent || 0));
+    const bar = formatProgressBar(safePercent, 10);
+    let sizeDetails = "";
+    if (totalBytes && totalBytes > 0) {
+      const curFormatted = formatBytes(currentBytes || 0);
+      const totFormatted = formatBytes(totalBytes);
+      sizeDetails = `\n<i>حجم:</i> <code>${curFormatted} / ${totFormatted}</code>`;
+    }
+
+    const text =
+      `<b>${stageText}</b>\n\n` +
+      `[<code>${bar}</code>] <b>${safePercent}%</b>` +
+      sizeDetails;
+
+    try {
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, text, {
+        parse_mode: "HTML",
+        reply_markup: buildActiveCancelKeyboard(),
+      });
+    } catch (_) {}
+  };
+
+  try {
+    await updateProgressMessage("در حال شروع دانلود ویدیو بر روی سرور...", 0, 0, downloadOptions.sizeBytes || 0);
+
+    // Initialize queue entry for this video
+    stmts.insertQueue.run({ code: state.data.code, temp_path: null, status: 'downloading' });
+
+    const downloadResult = await downloader.downloadVideo(
+      state.data.url,
+      config.TEMP_DIR,
+      async (percent, downloadedBytes, totalBytes) => {
+        await updateProgressMessage("در حال دانلود ویدیو بر روی سرور...", percent, downloadedBytes, totalBytes);
+      },
+      {
+        directUrl: downloadOptions.directUrl,
+        formatId: downloadOptions.formatId,
+        abortSignal: abortController.signal,
+      }
+    );
+
+    state.data.tempFilePath = downloadResult.filePath;
+    state.data.videoTitle = downloadResult.title;
+    state.data.videoSize = downloadResult.size;
+
+    // Update queue: download finished, save temp path
+    stmts.updateQueueStatus.run({ status: 'downloaded', code: state.data.code });
+    stmts.updateQueueTempPath.run({ temp_path: downloadResult.filePath, code: state.data.code });
+
+    await updateProgressMessage("دانلود تکمیل شد! در حال آماده‌سازی آپلود...", 100, downloadResult.size, downloadResult.size);
+
+    // Update queue: uploading
+    stmts.updateQueueStatus.run({ status: 'uploading', code: state.data.code });
+
+    const uploadResult = await uploader.uploadVideoToStorage(
+      ctx.api,
+      downloadResult.filePath,
+      config.STORAGE_CHANNEL_ID,
+      async (percent, uploadedBytes, totalBytes) => {
+        await updateProgressMessage("در حال آپلود ویدیو به چنل استوریج...", percent, uploadedBytes, totalBytes);
+      },
+      {
+        abortSignal: abortController.signal,
+      }
+    );
+
+    state.data.fileId = uploadResult.fileId;
+
+    // Update queue: upload finished
+    stmts.setQueueFileId.run({ file_id: uploadResult.fileId, status: 'uploaded', code: state.data.code });
+
+    // Cleanup temporary video file from disk
+    downloader.cleanupFile(downloadResult.filePath);
+    state.data.tempFilePath = null;
+    state.abortController = null;
+
+    try {
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
+    } catch (_) {}
+
+    state.step = "waiting_post_photo";
+    const hasCaption = Boolean(state.data.caption && state.data.caption.trim());
+    await ctx.reply(
+      `<b>ویدیو با موفقیت دانلود و در آرشیو ثبت شد!</b>\n` +
+        `حجم: <b>${formatBytes(downloadResult.size)}</b>\n\n` +
+        (hasCaption ? `<i>✅ کپشن پست به صورت خودکار بر اساس اطلاعات ویدیو آماده شد.</i>\n\n` : "") +
+        `<b>مرحله دوم:</b> لطفاً <b>عکس یا بنر پست کانال</b> را ارسال کنید.\n` +
+        `<i>(ثامبنیل دستی طبق انتخاب شما روی کانال پست خواهد شد)</i>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: buildCancelKeyboard(),
+      }
+    );
+  } catch (err) {
+    if (abortController.signal.aborted || err.message?.includes("aborted")) {
+      logger.info(`Operation gracefully cancelled for [${state.data?.code}]`);
+      return;
+    }
+    logger.error("Error in post download/upload:", err);
+    // Update queue: error
+    if (state.data?.code) {
+      stmts.setQueueError.run({ error_msg: err.message, code: state.data.code });
+    }
+    if (state.data?.tempFilePath) {
+      downloader.cleanupFile(state.data.tempFilePath);
+      state.data.tempFilePath = null;
+    }
+    try {
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        `<b>خطا در پردازش ویدیو:</b>\n<code>${err.message}</code>\n\nلطفاً لینک را بررسی کرده و مجدداً تلاش فرمایید.`,
+        { parse_mode: "HTML" }
+      );
+    } catch (_) {
+      await ctx.reply(`خطا: ${err.message}`);
+    }
+  }
 }
 
 /**
@@ -212,120 +362,69 @@ function registerPostHandler(bot) {
         return;
       }
 
+      state.data.url = url;
+
       const statusMsg = await ctx.reply("<b>در حال اتصال و استخراج اطلاعات ویدیو...</b>", {
         parse_mode: "HTML",
+        reply_markup: buildActiveCancelKeyboard(),
       });
 
-      // Attempt to extract video metadata and generate auto-caption
+      // Attempt to extract video metadata and qualities
       try {
         const metadata = await scraper.scrapeMetadata(url);
         if (metadata) {
-          const botInfo = await ctx.api.getMe();
-          const autoCaption = scraper.generateCaption(metadata, botInfo.username, state.data.code);
-          state.data.caption = autoCaption;
           state.data.scrapedMetadata = metadata;
           if (metadata.title) {
             state.data.videoTitle = metadata.title;
           }
-          logger.info(`Auto-generated caption for [${state.data.code}] via scraper`);
         }
       } catch (scrapeErr) {
         logger.warn(`Scraper metadata extraction error: ${scrapeErr.message}`);
       }
 
-      let lastStatusUpdate = 0;
-      const updateStatus = async (text) => {
-        const now = Date.now();
-        if (now - lastStatusUpdate > 2500) {
-          lastStatusUpdate = now;
-          try {
-            await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, text, {
-              parse_mode: "HTML",
-            });
-          } catch (_) {}
-        }
-      };
+      const metadata = state.data.scrapedMetadata;
+      const qualities = metadata?.qualities || [];
 
-      try {
-        await updateStatus("<b>در حال شروع دانلود ویدیو...</b>");
-        // Initialize queue entry for this video
-        stmts.insertQueue.run({ code: state.data.code, temp_path: null, status: 'downloading' });
+      // If multiple qualities are detected, prompt admin to select one
+      if (qualities.length > 1) {
+        state.step = "waiting_post_quality";
+        state.data.statusMessageId = statusMsg.message_id;
 
-        const downloadResult = await downloader.downloadVideo(
-          url,
-          config.TEMP_DIR,
-          async (percent, downloadedBytes, totalBytes) => {
-            const sizeStr = totalBytes ? ` (${(totalBytes / (1024 * 1024)).toFixed(1)} MB)` : "";
-            await updateStatus(`<b>در حال دانلود ویدیو:</b> ${percent}%${sizeStr}`);
-          }
-        );
+        const keyboard = buildQualityKeyboard(qualities);
+        const videoTitle = metadata?.title ? `\nعنوان: <b>${metadata.title}</b>` : "";
+        const compText = metadata?.company ? `\nکمپانی: <b>${metadata.company}</b>` : "";
 
-        state.data.tempFilePath = downloadResult.filePath;
-        state.data.videoTitle = downloadResult.title;
-        state.data.videoSize = downloadResult.size;
-
-        // Update queue: download finished, save temp path
-        stmts.updateQueueStatus.run({ status: 'downloaded', code: state.data.code });
-        stmts.updateQueueTempPath.run({ temp_path: downloadResult.filePath, code: state.data.code });
-
-        await updateStatus("<b>دانلود تکمیل شد! در حال آپلود به کانال آرشیو...</b>");
-
-        // Update queue: uploading
-        stmts.updateQueueStatus.run({ status: 'uploading', code: state.data.code });
-
-        const uploadResult = await uploader.uploadVideoToStorage(
-          ctx.api,
-          downloadResult.filePath,
-          config.STORAGE_CHANNEL_ID,
-          async (percent) => {
-            await updateStatus(`<b>در حال آپلود ویدیو به تلگرام:</b> ${percent}%`);
-          }
-        );
-
-        state.data.fileId = uploadResult.fileId;
-
-        // Update queue: upload finished
-        stmts.setQueueFileId.run({ file_id: uploadResult.fileId, status: 'uploaded', code: state.data.code });
-
-        // Cleanup temporary video file from disk
-        downloader.cleanupFile(downloadResult.filePath);
-        state.data.tempFilePath = null;
-
-        try {
-          await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
-        } catch (_) {}
-
-        state.step = "waiting_post_photo";
-        const hasCaption = Boolean(state.data.caption && state.data.caption.trim());
-        await ctx.reply(
-          `<b>ویدیو با موفقیت دانلود و در آرشیو ثبت شد!</b>\n` +
-            `حجم: <b>${(downloadResult.size / (1024 * 1024)).toFixed(1)} MB</b>\n\n` +
-            (hasCaption ? `<i>✅ کپشن پست به صورت خودکار بر اساس اطلاعات ویدیو آماده شد.</i>\n\n` : "") +
-            `<b>مرحله دوم:</b> لطفاً <b>عکس یا بنر پست کانال</b> را ارسال کنید.\n` +
-            `<i>(ثامبنیل دستی طبق انتخاب شما روی کانال پست خواهد شد)</i>`,
+        await ctx.api.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          `<b>اطلاعات ویدیو با موفقیت دریافت شد!</b>${videoTitle}${compText}\n\n` +
+            `این ویدیو دارای <b>${qualities.length} کیفیت</b> مختلف است.\n` +
+            `لطفاً کیفیت مورد نظر را جهت دانلود انتخاب کنید:`,
           {
             parse_mode: "HTML",
-            reply_markup: buildCancelKeyboard(),
+            reply_markup: keyboard,
           }
         );
-      } catch (err) {
-        logger.error("Error in post download/upload:", err);
-        // Update queue: error
-        stmts.setQueueError.run({ error_msg: err.message, code: state.data.code });
-        if (state.data.tempFilePath) {
-          downloader.cleanupFile(state.data.tempFilePath);
-        }
-        try {
-          await ctx.api.editMessageText(
-            ctx.chat.id,
-            statusMsg.message_id,
-            `<b>خطا در پردازش ویدیو:</b>\n<code>${err.message}</code>\n\nلطفاً لینک را بررسی کرده و مجدداً تلاش فرمایید.`,
-            { parse_mode: "HTML" }
-          );
-        } catch (_) {
-          await ctx.reply(`خطا: ${err.message}`);
-        }
+        return;
       }
+
+      // Single quality or fallback
+      const defaultQuality = qualities.length === 1 ? qualities[0] : null;
+      const botInfo = await ctx.api.getMe();
+      if (metadata) {
+        state.data.caption = scraper.generateCaption(
+          metadata,
+          botInfo.username,
+          state.data.code,
+          defaultQuality?.label
+        );
+      }
+
+      await processVideoDownloadAndUpload(ctx, state, statusMsg, {
+        directUrl: defaultQuality?.directUrl,
+        formatId: defaultQuality?.formatId,
+        sizeBytes: defaultQuality?.sizeBytes,
+      });
       return;
     }
 
@@ -439,6 +538,74 @@ function registerPostHandler(bot) {
     const userId = ctx.from.id;
     resetPostState(userId);
     await ctx.reply("عملیات ایجاد و ارسال پست لغو گردید.");
+  });
+
+  // Handle quality selection callback
+  bot.callbackQuery(/^post_quality_(.+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+
+    if (!state || state.step !== "waiting_post_quality") {
+      await ctx.reply("انتخاب کیفیت نامعتبر یا منقضی شده است. لطفاً دستور /post را مجدداً ارسال کنید.");
+      return;
+    }
+
+    const qualityId = ctx.match[1];
+    const metadata = state.data.scrapedMetadata;
+    const qualities = metadata?.qualities || [];
+    const selected = qualities.find((q) => q.id === qualityId);
+
+    const botInfo = await ctx.api.getMe();
+    if (metadata) {
+      state.data.caption = scraper.generateCaption(
+        metadata,
+        botInfo.username,
+        state.data.code,
+        selected?.label
+      );
+    }
+
+    const statusMsg = { message_id: ctx.callbackQuery.message.message_id };
+    await processVideoDownloadAndUpload(ctx, state, statusMsg, {
+      directUrl: selected?.directUrl,
+      formatId: selected?.formatId,
+      sizeBytes: selected?.sizeBytes,
+    });
+  });
+
+  // Instant cancellation during active download/upload or quality selection
+  bot.callbackQuery("post_cancel_active", async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "عملیات لغو شد." });
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+
+    if (state) {
+      if (state.abortController) {
+        try {
+          state.abortController.abort();
+        } catch (_) {}
+      }
+      if (state.data?.code) {
+        try {
+          stmts.updateQueueStatus.run({ status: "cancelled", code: state.data.code });
+        } catch (_) {}
+      }
+      if (state.data?.tempFilePath) {
+        downloader.cleanupFile(state.data.tempFilePath);
+        state.data.tempFilePath = null;
+      }
+      resetPostState(userId);
+    }
+
+    try {
+      await ctx.editMessageText(
+        "❌ <b>عملیات لغو گردید و فایل‌های موقت پاکسازی شدند.</b>",
+        { parse_mode: "HTML" }
+      );
+    } catch (_) {
+      await ctx.reply("❌ عملیات لغو گردید.");
+    }
   });
 }
 

@@ -52,17 +52,18 @@ async function getGramJsClient() {
  * @param {Function} [onProgress] - Upload progress callback
  * @returns {Promise<{ fileId: string, messageId: number, isMsgRef: boolean }>}
  */
-async function uploadVideoToStorage(botApi, filePath, channelId, onProgress) {
+async function uploadVideoToStorage(botApi, filePath, channelId, onProgress, options = {}) {
   const stats = fs.statSync(filePath);
   const fileSizeMB = stats.size / (1024 * 1024);
   const fileName = path.basename(filePath);
+  const abortSignal = options.abortSignal;
 
   logger.info(`Preparing upload for ${fileName} (${fileSizeMB.toFixed(2)} MB) to storage channel ${channelId}`);
 
   // Under 50MB and GramJS not configured
   if (fileSizeMB <= 49.5 && !config.TELEGRAM_API_ID) {
     logger.info("File is under 50MB. Uploading via standard Telegram Bot API...");
-    if (onProgress) onProgress(20);
+    if (onProgress) onProgress(20, Math.round(stats.size * 0.2), stats.size);
 
     const inputFile = new InputFile(filePath);
     const sent = await botApi.sendVideo(channelId, inputFile, {
@@ -70,7 +71,7 @@ async function uploadVideoToStorage(botApi, filePath, channelId, onProgress) {
       caption: `Archived: ${fileName} (${fileSizeMB.toFixed(1)} MB)`,
     });
 
-    if (onProgress) onProgress(100);
+    if (onProgress) onProgress(100, stats.size, stats.size);
     return {
       fileId: sent.video.file_id,
       messageId: sent.message_id,
@@ -117,6 +118,12 @@ async function uploadVideoToStorage(botApi, filePath, channelId, onProgress) {
         );
       }
     }, 15000);
+
+    if (abortSignal) {
+      abortSignal.addEventListener("abort", () => {
+        reject(new Error("Upload aborted by user"));
+      });
+    }
   });
 
   const uploadWorkers = config.UPLOAD_WORKERS || 4;
@@ -128,11 +135,15 @@ async function uploadVideoToStorage(botApi, filePath, channelId, onProgress) {
     supportsStreaming: true,
     caption: `Archived via GramJS: ${fileName} (${fileSizeMB.toFixed(1)} MB)`,
     progressCallback: (progress) => {
+      if (abortSignal && abortSignal.aborted) {
+        throw new Error("Upload aborted by user");
+      }
       lastActivityTime = Date.now();
       const currentPercent = Math.min(99, Math.round(progress * 100));
-      if (currentPercent - lastReportedPercent >= 5 && onProgress) {
+      const uploadedBytes = Math.round(progress * stats.size);
+      if (currentPercent - lastReportedPercent >= 3 && onProgress) {
         lastReportedPercent = currentPercent;
-        onProgress(currentPercent);
+        onProgress(currentPercent, uploadedBytes, stats.size);
       }
     },
   });
@@ -142,14 +153,14 @@ async function uploadVideoToStorage(botApi, filePath, channelId, onProgress) {
     sentMessage = await Promise.race([uploadPromise, timeoutPromise]);
   } catch (err) {
     logger.error("Video upload failed:", err);
-    if (onProgress) onProgress(0);
+    if (onProgress) onProgress(0, 0, stats.size);
     throw err;
   } finally {
     if (timerId) clearTimeout(timerId);
     if (stallCheckInterval) clearInterval(stallCheckInterval);
   }
 
-  if (onProgress) onProgress(100);
+  if (onProgress) onProgress(100, stats.size, stats.size);
   logger.success(`Upload complete via GramJS! Storage Message ID: ${sentMessage.id}`);
 
   // Reference stored as msg:channelId:messageId for copyMessage delivery

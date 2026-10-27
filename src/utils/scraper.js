@@ -1,5 +1,6 @@
 const cheerio = require("cheerio");
 const logger = require("./logger");
+const { formatBytes } = require("./helpers");
 
 /**
  * Convert ISO 8601 duration (e.g., PT1H0M14S, PT0H31M52S, PT41M) to formatted minutes string (e.g. "41Min")
@@ -161,6 +162,34 @@ function parseWatchPorn(html, url) {
     releaseYear = new Date().getFullYear().toString();
   }
 
+  // Extract available direct qualities from flashvars
+  const qualities = [];
+  const flashvarsMatch = html.match(/flashvars\s*=\s*({[\s\S]*?});/);
+  if (flashvarsMatch) {
+    const fv = flashvarsMatch[1];
+    const url720Match = fv.match(/video_url:\s*['"]([^'"]+)['"]/);
+    const text720Match = fv.match(/video_url_text:\s*['"]([^'"]+)['"]/);
+    const url1080Match = fv.match(/video_alt_url:\s*['"]([^'"]+)['"]/);
+    const text1080Match = fv.match(/video_alt_url_text:\s*['"]([^'"]+)['"]/);
+
+    if (url720Match && url720Match[1]) {
+      const label = text720Match ? text720Match[1].trim() : "720p";
+      qualities.push({
+        id: "720p",
+        label,
+        directUrl: url720Match[1],
+      });
+    }
+    if (url1080Match && url1080Match[1]) {
+      const label = text1080Match ? text1080Match[1].trim() : "1080p";
+      qualities.push({
+        id: "1080p",
+        label,
+        directUrl: url1080Match[1],
+      });
+    }
+  }
+
   return {
     title,
     company,
@@ -169,6 +198,7 @@ function parseWatchPorn(html, url) {
     duration,
     releaseYear,
     categories,
+    qualities,
   };
 }
 
@@ -283,6 +313,7 @@ function parseSxyPrn(html, url) {
     duration,
     releaseYear,
     categories,
+    qualities: [],
   };
 }
 
@@ -326,10 +357,39 @@ async function scrapeMetadata(url) {
 
     if (isWatchPorn) {
       const metadata = parseWatchPorn(html, url);
-      logger.success(`Extracted watchporn.to metadata: "${metadata.title}" [${metadata.company}]`);
+      // Query content-length in parallel for all extracted qualities
+      if (metadata.qualities && metadata.qualities.length > 0) {
+        await Promise.allSettled(
+          metadata.qualities.map(async (q) => {
+            if (q.directUrl) {
+              try {
+                const headRes = await fetch(q.directUrl, {
+                  method: "HEAD",
+                  headers: { "User-Agent": "Mozilla/5.0" },
+                  signal: AbortSignal.timeout(3500),
+                });
+                const len = Number(headRes.headers.get("content-length")) || 0;
+                if (len > 0) {
+                  q.sizeBytes = len;
+                  q.sizeFormatted = formatBytes(len);
+                }
+              } catch (_) {}
+            }
+          })
+        );
+      }
+      logger.success(`Extracted watchporn.to metadata: "${metadata.title}" [${metadata.company}] (${metadata.qualities.length} qualities)`);
       return metadata;
     } else if (isSxyPrn) {
       const metadata = parseSxyPrn(html, url);
+      // Try probing yt-dlp formats
+      try {
+        const { probeYtDlpFormats } = require("./downloader");
+        const ytdlQualities = await probeYtDlpFormats(url);
+        if (ytdlQualities && ytdlQualities.length > 1) {
+          metadata.qualities = ytdlQualities;
+        }
+      } catch (_) {}
       logger.success(`Extracted sxyprn.net metadata: "${metadata.title}" [${metadata.company}]`);
       return metadata;
     }
@@ -348,7 +408,7 @@ async function scrapeMetadata(url) {
  * @param {string} code
  * @returns {string}
  */
-function generateCaption(meta, botUsername, code) {
+function generateCaption(meta, botUsername, code, customResolution) {
   if (!meta) return "";
 
   const actors = Array.isArray(meta.actors) && meta.actors.length > 0
@@ -360,7 +420,7 @@ function generateCaption(meta, botUsername, code) {
     : "";
 
   const companyTag = meta.company ? toHashtag(meta.company) : "";
-  const resolution = meta.resolution || "720p";
+  const resolution = customResolution || meta.resolution || "720p";
   const duration = meta.duration || "";
   const releaseYear = meta.releaseYear || "";
   const title = meta.title || "";

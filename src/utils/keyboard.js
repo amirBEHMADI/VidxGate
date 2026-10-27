@@ -148,6 +148,32 @@ function buildPostPreviewKeyboard(botUsername, videoCode) {
   return keyboard;
 }
 
+/**
+ * ساخت کیبورد انتخاب کیفیت ویدیو برای ادمین
+ * @param {Array<{ id: string, label: string, sizeFormatted?: string }>} qualities
+ * @returns {InlineKeyboard}
+ */
+function buildQualityKeyboard(qualities) {
+  const keyboard = new InlineKeyboard();
+
+  for (const q of qualities) {
+    const sizeText = q.sizeFormatted ? ` (${q.sizeFormatted})` : "";
+    keyboard.text(`🎥 ${q.label}${sizeText}`, `post_quality_${q.id}`);
+  }
+  keyboard.row();
+  keyboard.text("❌ لغو عملیات", "post_cancel_active");
+
+  return keyboard;
+}
+
+/**
+ * کیبورد لغو آنی در حین دانلود و آپلود فعال
+ * @returns {InlineKeyboard}
+ */
+function buildActiveCancelKeyboard() {
+  return new InlineKeyboard().text("❌ لغو عملیات", "post_cancel_active");
+}
+
 module.exports = {
   buildSponsorKeyboard,
   buildChannelPostKeyboard,
@@ -156,6 +182,8 @@ module.exports = {
   buildSponsorManageKeyboard,
   buildAdminManageKeyboard,
   buildPostPreviewKeyboard,
+  buildQualityKeyboard,
+  buildActiveCancelKeyboard,
 };
 
 
