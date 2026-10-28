@@ -2,15 +2,28 @@ const cheerio = require("cheerio");
 const logger = require("./logger");
 
 /**
- * Clean and format actor name for searching
- * @param {string} actorName
+ * Clean and format actor name for searching (strictly extracting the first actor)
+ * @param {string|Array<string>} actorName
  * @returns {string}
  */
 function cleanActorName(actorName) {
-  if (!actorName || typeof actorName !== "string") return "";
-  return actorName
+  if (!actorName) return "";
+  let name = "";
+  if (Array.isArray(actorName)) {
+    name = actorName[0] || "";
+  } else if (typeof actorName === "string") {
+    name = actorName;
+  } else {
+    return "";
+  }
+
+  // Take strictly the first actor if multiple are separated by comma, &, /, or 'and'
+  const firstActor = name.split(/[,&/]| and | feat\.? /i)[0];
+
+  return firstActor
     .replace(/^#+/, "")
     .replace(/[_\-]+/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 

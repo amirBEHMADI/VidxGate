@@ -180,16 +180,12 @@ function buildActiveCancelKeyboard() {
  * @param {number} params.imageCount - تعداد تصاویر یافت شده (حداکثر ۱۰)
  * @param {string} params.actorName - نام بازیگر
  * @param {number} [params.currentPage=1] - شماره صفحه جاری
- * @param {Array<string>} [params.allActors=[]] - لیست کل بازیگران شناسایی شده
- * @param {number} [params.currentActorIndex=0] - ایندکس بازیگر جاری
  * @returns {InlineKeyboard}
  */
 function buildThumbnailKeyboard({
   imageCount,
   actorName,
   currentPage = 1,
-  allActors = [],
-  currentActorIndex = 0,
 }) {
   const keyboard = new InlineKeyboard();
 
@@ -214,15 +210,6 @@ function buildThumbnailKeyboard({
   }
   keyboard.text("🔄 ۱۰ عکس بعدی", "post_thumb_next").row();
 
-  // در صورتی که چند بازیگر در ویدیو شناسایی شده باشد
-  if (Array.isArray(allActors) && allActors.length > 1) {
-    for (let i = 0; i < allActors.length; i++) {
-      if (i !== currentActorIndex && allActors[i]) {
-        keyboard.text(`👤 عکس‌های ${allActors[i]}`, `post_thumb_actor_${i}`).row();
-      }
-    }
-  }
-
   // گزینه‌های جستجوی نام دلخواه، ارسال دستی و لغو
   keyboard
     .text("🔍 جستجوی بازیگر دیگر", "post_thumb_search_name")
@@ -235,19 +222,10 @@ function buildThumbnailKeyboard({
 
 /**
  * کیبورد حالت عدم یافتن تصویر برای بازیگر
- * @param {Array<string>} [allActors=[]]
  * @returns {InlineKeyboard}
  */
-function buildNoThumbnailsKeyboard(allActors = []) {
+function buildNoThumbnailsKeyboard() {
   const keyboard = new InlineKeyboard();
-
-  if (Array.isArray(allActors) && allActors.length > 1) {
-    for (let i = 1; i < allActors.length; i++) {
-      if (allActors[i]) {
-        keyboard.text(`👤 جستجوی ${allActors[i]}`, `post_thumb_actor_${i}`).row();
-      }
-    }
-  }
 
   keyboard
     .text("🔍 جستجوی بازیگر دیگر", "post_thumb_search_name")

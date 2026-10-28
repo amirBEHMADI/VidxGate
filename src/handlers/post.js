@@ -56,10 +56,17 @@ async function sendPostPreview(ctx, state) {
   const botInfo = await ctx.api.getMe();
   const keyboard = buildPostPreviewKeyboard(botInfo.username, state.data.code);
 
+  let caption = state.data.caption || "";
+  // Ensure the embedded caption doesn't cause previewNotice to exceed Telegram's 1024 limit
+  const maxSafeCaptionLen = 1024 - 160;
+  if (caption.length > maxSafeCaptionLen) {
+    caption = caption.slice(0, maxSafeCaptionLen - 3) + "...";
+  }
+
   const previewNotice =
     `<b>پیش‌نمایش پست کانال</b>\n` +
     `--------------------\n` +
-    `${state.data.caption}\n` +
+    `${caption}\n` +
     `--------------------\n` +
     `<i>کد ثبت ویدیو:</i> <code>${state.data.code}</code>\n` +
     `<i>وضعیت ویدیو:</i> ذخیره شده در آرشیو (تایید شد)`;
@@ -111,7 +118,7 @@ async function presentActorThumbnails(ctx, state, actorName, page = 1) {
           `• یا مستقیماً <b>عکس دلخواه</b> را از گالری ارسال نمایید.`,
         {
           parse_mode: "HTML",
-          reply_markup: buildNoThumbnailsKeyboard(state.data.scrapedMetadata?.actors),
+          reply_markup: buildNoThumbnailsKeyboard(),
         }
       );
       return;
@@ -121,11 +128,6 @@ async function presentActorThumbnails(ctx, state, actorName, page = 1) {
     state.data.actorName = cleanedName;
     state.data.imagePage = page;
     state.data.searchedImages = images;
-
-    const allActors = state.data.scrapedMetadata?.actors || [];
-    const currentActorIndex = allActors.findIndex(
-      (a) => a.toLowerCase() === cleanedName.toLowerCase()
-    );
 
     let albumSent = false;
     let sentMessages = [];
@@ -191,8 +193,6 @@ async function presentActorThumbnails(ctx, state, actorName, page = 1) {
       imageCount: images.length,
       actorName: cleanedName,
       currentPage: page,
-      allActors,
-      currentActorIndex: currentActorIndex >= 0 ? currentActorIndex : 0,
     });
 
     await ctx.reply(
@@ -652,12 +652,17 @@ function registerPostHandler(bot) {
       const botInfo = await ctx.api.getMe();
       const channelKeyboard = buildChannelPostKeyboard(botInfo.username, state.data.code);
 
+      let channelCaption = state.data.caption || "";
+      if (channelCaption.length > 1024) {
+        channelCaption = channelCaption.slice(0, 1020) + "...";
+      }
+
       // 3. Post photo + caption + inline button to destination channel
       const channelMessage = await ctx.api.sendPhoto(
         config.POST_CHANNEL_ID,
         state.data.photoFileId,
         {
-          caption: state.data.caption,
+          caption: channelCaption,
           parse_mode: "HTML",
           reply_markup: channelKeyboard,
         }

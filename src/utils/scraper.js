@@ -197,7 +197,7 @@ function parseWatchPorn(html, url) {
     resolution,
     duration,
     releaseYear,
-    categories,
+    categories: categories.slice(0, 6),
     qualities,
   };
 }
@@ -312,7 +312,7 @@ function parseSxyPrn(html, url) {
     resolution,
     duration,
     releaseYear,
-    categories,
+    categories: categories.slice(0, 6),
     qualities: [],
   };
 }
@@ -412,11 +412,12 @@ function generateCaption(meta, botUsername, code, customResolution) {
   if (!meta) return "";
 
   const actors = Array.isArray(meta.actors) && meta.actors.length > 0
-    ? meta.actors.map(toHashtag).filter(Boolean).join(" ")
+    ? meta.actors.slice(0, 6).map(toHashtag).filter(Boolean).join(" ")
     : "";
 
+  // Strictly limited to at most 6 categories
   const cats = Array.isArray(meta.categories) && meta.categories.length > 0
-    ? meta.categories.map(toHashtag).filter(Boolean).join(" ")
+    ? meta.categories.slice(0, 6).map(toHashtag).filter(Boolean).join(" ")
     : "";
 
   const companyTag = meta.company ? toHashtag(meta.company) : "";
@@ -425,7 +426,7 @@ function generateCaption(meta, botUsername, code, customResolution) {
   const releaseYear = meta.releaseYear || "";
   const title = meta.title || "";
 
-  return [
+  let caption = [
     `❖ Title: ${title}`,
     `📽 Company: ${companyTag}`,
     `👤 Actors: ${actors}`,
@@ -437,6 +438,13 @@ function generateCaption(meta, botUsername, code, customResolution) {
     `🌐 <a href="https://t.me/${botUsername}?start=${code}">${resolution}</a>`,
     `♠️ ${companyTag} - @vidxeducation`,
   ].join("\n");
+
+  // Safeguard: ensure caption fits comfortably within Telegram's 1024 char limit
+  if (caption.length > 900) {
+    caption = caption.slice(0, 897) + "...";
+  }
+
+  return caption;
 }
 
 module.exports = {
