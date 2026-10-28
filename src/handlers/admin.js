@@ -1,3 +1,4 @@
+const { InlineKeyboard } = require("grammy");
 const { stmts } = require("../database/db");
 const config = require("../config");
 const logger = require("../utils/logger");
@@ -8,6 +9,7 @@ const {
   buildCancelKeyboard,
   buildChannelPostKeyboard,
   buildSponsorManageKeyboard,
+  buildAdminManageKeyboard,
 } = require("../utils/keyboard");
 const { syncUserCommands } = require("../utils/commands");
 
@@ -40,6 +42,180 @@ function registerAdminHandler(bot) {
       parse_mode: "HTML",
       reply_markup: buildAdminKeyboard(perms),
     });
+  });
+
+  // /admins command - manage sub-admins (Owner only)
+  bot.command("admins", async (ctx) => {
+    const perms = getPermissions(ctx.from.id);
+    if (!perms.isOwner) {
+      await ctx.reply("⛔ دستور /admins فقط توسط مالک اصلی ربات قابل استفاده است.");
+      return;
+    }
+
+    resetAdminState();
+    const admins = stmts.getAllAdmins.all();
+    const keyboard = buildAdminManageKeyboard(admins);
+
+    await ctx.reply(
+      `👥 <b>مدیریت ادمین‌ها</b>\n\n` +
+        `📌 <b>راهنمای نشانه‌ها:</b>\n` +
+        `🎬 = مدیریت ویدیوها\n` +
+        `📢 = مدیریت اسپانسرها\n` +
+        `📣 = ارسال پیام همگانی (برودکست)\n\n` +
+        (admins.length === 0
+          ? "هیچ ادمین فرعی تعریف نشده است."
+          : `${formatNumber(admins.length)} ادمین ثبت شده است:`),
+      {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      }
+    );
+  });
+
+  // /sponsors command - manage sponsor channels
+  bot.command("sponsors", async (ctx) => {
+    const perms = getPermissions(ctx.from.id);
+    if (!perms.canManageSponsors) {
+      await ctx.reply("⛔ شما دسترسی مدیریت کانال‌های اسپانسر را ندارید.");
+      return;
+    }
+
+    resetAdminState();
+    const sponsors = stmts.getAllSponsors.all();
+    const keyboard = buildSponsorManageKeyboard(sponsors);
+
+    await ctx.reply(
+      `📢 <b>مدیریت اسپانسرها</b>\n\n` +
+        (sponsors.length === 0
+          ? "هنوز اسپانسری اضافه نشده است."
+          : `${formatNumber(sponsors.length)} اسپانسر ثبت شده است.\n✅ فعال | ❌ غیرفعال`),
+      {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      }
+    );
+  });
+
+  // /stats command - view system statistics
+  bot.command("stats", async (ctx) => {
+    const perms = getPermissions(ctx.from.id);
+    if (!perms.isAdmin) {
+      await ctx.reply("⛔ شما دسترسی به آمار سیستم را ندارید.");
+      return;
+    }
+
+    resetAdminState();
+    const { count: userCount } = stmts.getUserCount.get();
+    const { count: videoCount } = stmts.getVideoCount.get();
+    const { count: downloadCount } = stmts.getTotalDownloads.get();
+    const sponsorCount = stmts.getActiveSponsors.all().length;
+
+    await ctx.reply(
+      `📊 <b>آمار ربات</b>\n\n` +
+        `👥 کاربران: <b>${formatNumber(userCount)}</b>\n` +
+        `🎬 ویدیوها: <b>${formatNumber(videoCount)}</b>\n` +
+        `📥 کل دانلودها: <b>${formatNumber(downloadCount)}</b>\n` +
+        `📢 اسپانسرهای فعال: <b>${formatNumber(sponsorCount)}</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🔙 پنل مدیریت", "admin_back"),
+      }
+    );
+  });
+
+  // /broadcast command - broadcast message to users
+  bot.command("broadcast", async (ctx) => {
+    const perms = getPermissions(ctx.from.id);
+    if (!perms.canBroadcast) {
+      await ctx.reply("⛔ شما دسترسی ارسال پیام همگانی (برودکست) را ندارید.");
+      return;
+    }
+
+    resetAdminState();
+    const text = ctx.match?.trim();
+    if (text) {
+      await doBroadcast(ctx, text);
+      return;
+    }
+
+    adminState.current = "waiting_broadcast";
+    await ctx.reply(
+      `📣 <b>ارسال پیام همگانی (برودکست)</b>\n\n` +
+        `لطفاً متن پیامی که می‌خواهید برای تمام کاربران ارسال شود را بفرستید:\n` +
+        `<i>(از تگ‌های HTML می‌توانید استفاده کنید)</i>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: buildCancelKeyboard(),
+      }
+    );
+  });
+
+  // /delete command - delete a video by code
+  bot.command("delete", async (ctx) => {
+    const perms = getPermissions(ctx.from.id);
+    if (!perms.canManageVideos) {
+      await ctx.reply("⛔ شما دسترسی حذف ویدیو را ندارید.");
+      return;
+    }
+
+    resetAdminState();
+    const code = ctx.match?.trim();
+    if (code) {
+      const video = stmts.getVideoByCode.get(code);
+      if (!video) {
+        await ctx.reply("❌ ویدیویی با این کد پیدا نشد!");
+        return;
+      }
+      stmts.deleteVideo.run(code);
+      logger.info(`Video [${code}] deleted by admin ${ctx.from.id}`);
+      await ctx.reply(`✅ ویدیو با کد <code>${code}</code> با موفقیت حذف شد.`, {
+        parse_mode: "HTML",
+      });
+      return;
+    }
+
+    adminState.current = "waiting_delete_code";
+    await ctx.reply(
+      `🗑️ <b>حذف ویدیو</b>\n\n` +
+        `لطفاً <b>کد اختصاصی ویدیو</b> را ارسال فرمایید:`,
+      {
+        parse_mode: "HTML",
+        reply_markup: buildCancelKeyboard(),
+      }
+    );
+  });
+
+  // /videos command - list recent videos
+  bot.command(["videos", "videolist"], async (ctx) => {
+    const perms = getPermissions(ctx.from.id);
+    if (!perms.canManageVideos) {
+      await ctx.reply("⛔ شما دسترسی مشاهده لیست ویدیوها را ندارید.");
+      return;
+    }
+
+    resetAdminState();
+    const videos = stmts.getAllVideos.all();
+
+    if (videos.length === 0) {
+      await ctx.reply("📋 هیچ ویدیویی ثبت نشده است!", {
+        reply_markup: new InlineKeyboard().text("🔙 پنل مدیریت", "admin_back"),
+      });
+      return;
+    }
+
+    const list = videos.slice(0, 15).map((v, i) => {
+      const caption = v.caption ? v.caption.substring(0, 30) : "بدون کپشن";
+      return `${i + 1}. <code>${v.code}</code> — ${caption} (👁 ${v.views})`;
+    });
+
+    await ctx.reply(
+      `📋 <b>لیست ویدیوها</b> (${formatNumber(videos.length)} ویدیو)\n\n` +
+        list.join("\n"),
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🔙 پنل مدیریت", "admin_back"),
+      }
+    );
   });
 
   // /add command - start process to add a new video

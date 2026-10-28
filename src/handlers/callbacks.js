@@ -90,6 +90,22 @@ function registerCallbackHandler(bot) {
         } else if (data.startsWith("delete_admin_")) {
           if (!perms.isOwner) return ctx.answerCallbackQuery({ text: "⛔ فقط مالک دسترسی دارد!" });
           await handleDeleteAdmin(ctx, data);
+        } else if (data.startsWith("admin_detail_")) {
+          if (!perms.isOwner) return ctx.answerCallbackQuery({ text: "⛔ فقط مالک دسترسی دارد!" });
+          const adminId = Number(data.replace("admin_detail_", ""));
+          const admin = stmts.getAdmin.get(adminId);
+          if (admin) {
+            const roles = [];
+            if (admin.can_manage_videos) roles.push("🎬 مدیریت ویدیوها");
+            if (admin.can_manage_sponsors) roles.push("📢 مدیریت اسپانسرها");
+            if (admin.can_broadcast) roles.push("📣 برودکست");
+            await ctx.answerCallbackQuery({
+              text: `👤 ادمین: ${admin.name || "بی‌نام"}\nشناسه: ${admin.user_id}\nدسترسی‌ها:\n${roles.join("\n") || "بدون دسترسی"}`,
+              show_alert: true,
+            });
+          } else {
+            await ctx.answerCallbackQuery({ text: "اطلاعات ادمین یافت نشد." });
+          }
         } else {
           await next();
         }

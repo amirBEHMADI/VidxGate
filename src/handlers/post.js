@@ -1,3 +1,4 @@
+const { InputFile } = require("grammy");
 const { stmts } = require("../database/db");
 const config = require("../config");
 const logger = require("../utils/logger");
@@ -14,10 +15,13 @@ const {
   buildChannelPostKeyboard,
   buildQualityKeyboard,
   buildActiveCancelKeyboard,
+  buildThumbnailKeyboard,
+  buildNoThumbnailsKeyboard,
 } = require("../utils/keyboard");
 const downloader = require("../utils/downloader");
 const uploader = require("../utils/uploader");
 const scraper = require("../utils/scraper");
+const imageSearch = require("../utils/imageSearch");
 
 // In-memory conversation state for each admin during post creation
 const postStates = new Map();
@@ -67,6 +71,152 @@ async function sendPostPreview(ctx, state) {
   });
 
   state.step = "preview";
+}
+
+/**
+ * Search and present actor thumbnails to admin as a media group with interactive buttons
+ * @param {object} ctx - grammY context
+ * @param {object} state - Admin post state
+ * @param {string} actorName - Name of the actor to search
+ * @param {number} [page=1] - Results page
+ */
+async function presentActorThumbnails(ctx, state, actorName, page = 1) {
+  const cleanedName = imageSearch.cleanActorName(actorName);
+  if (!cleanedName) {
+    await ctx.reply("نام بازیگر معتبر نمی‌باشد. لطفاً نام دیگری را ارسال فرمایید.", {
+      reply_markup: buildCancelKeyboard(),
+    });
+    return;
+  }
+
+  const statusMsg = await ctx.reply(
+    `🔍 <b>در حال جستجوی تصاویر باکیفیت برای «${cleanedName}»...</b>\n<i>(ترجیحاً اینستاگرام و شات‌های مدلینگ)</i>`,
+    { parse_mode: "HTML" }
+  );
+
+  try {
+    const images = await imageSearch.searchActorImages(cleanedName, { page, limit: 10 });
+
+    try {
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
+    } catch (_) {}
+
+    if (!images || images.length === 0) {
+      state.step = "waiting_post_thumbnail";
+      state.data.actorName = cleanedName;
+      await ctx.reply(
+        `⚠️ <b>تصویری برای بازیگر «${cleanedName}» یافت نشد.</b>\n\n` +
+          `می‌توانید:\n` +
+          `• <b>نام بازیگر دیگری</b> را تایپ و ارسال کنید.\n` +
+          `• یا مستقیماً <b>عکس دلخواه</b> را از گالری ارسال نمایید.`,
+        {
+          parse_mode: "HTML",
+          reply_markup: buildNoThumbnailsKeyboard(state.data.scrapedMetadata?.actors),
+        }
+      );
+      return;
+    }
+
+    state.step = "waiting_post_thumbnail";
+    state.data.actorName = cleanedName;
+    state.data.imagePage = page;
+    state.data.searchedImages = images;
+
+    const allActors = state.data.scrapedMetadata?.actors || [];
+    const currentActorIndex = allActors.findIndex(
+      (a) => a.toLowerCase() === cleanedName.toLowerCase()
+    );
+
+    let albumSent = false;
+    let sentMessages = [];
+
+    const captionHeader =
+      `📸 <b>تصاویر پیشنهادی برای «${cleanedName}»</b> (صفحه ${page})\n` +
+      `<i>شماره ثامبنیل دلخواه را از دکمه‌های زیر انتخاب فرمایید:</i>`;
+
+    if (images.length >= 2) {
+      try {
+        const mediaGroup = images.map((img, idx) => ({
+          type: "photo",
+          media: img.highResUrl,
+          caption: idx === 0 ? captionHeader : undefined,
+          parse_mode: "HTML",
+        }));
+        sentMessages = await ctx.replyWithMediaGroup(mediaGroup);
+        albumSent = true;
+      } catch (urlErr) {
+        logger.warn(`Media group by URL failed: ${urlErr.message}. Trying buffer download...`);
+        try {
+          const bufferItems = [];
+          for (let i = 0; i < images.length; i++) {
+            const buf = await imageSearch.fetchImageBuffer(images[i].highResUrl, images[i].thumbUrl);
+            if (buf) {
+              bufferItems.push({
+                type: "photo",
+                media: new InputFile(buf, `thumb_${i + 1}.jpg`),
+                caption: bufferItems.length === 0 ? captionHeader : undefined,
+                parse_mode: "HTML",
+              });
+            }
+          }
+          if (bufferItems.length >= 2) {
+            sentMessages = await ctx.replyWithMediaGroup(bufferItems);
+            albumSent = true;
+          }
+        } catch (bufErr) {
+          logger.error(`Buffer media group failed: ${bufErr.message}`);
+        }
+      }
+    } else if (images.length === 1) {
+      try {
+        const sent = await ctx.replyWithPhoto(images[0].highResUrl, {
+          caption: captionHeader,
+          parse_mode: "HTML",
+        });
+        sentMessages = [sent];
+        albumSent = true;
+      } catch (_) {}
+    }
+
+    // Cache Telegram file_ids from successfully sent media
+    if (albumSent && Array.isArray(sentMessages)) {
+      sentMessages.forEach((msg, idx) => {
+        if (msg?.photo?.length && state.data.searchedImages[idx]) {
+          state.data.searchedImages[idx].fileId = msg.photo[msg.photo.length - 1].file_id;
+        }
+      });
+    }
+
+    const keyboard = buildThumbnailKeyboard({
+      imageCount: images.length,
+      actorName: cleanedName,
+      currentPage: page,
+      allActors,
+      currentActorIndex: currentActorIndex >= 0 ? currentActorIndex : 0,
+    });
+
+    await ctx.reply(
+      `<b>انتخاب تصویر ثامبنیل برای پست کانال:</b>\n` +
+        `👤 بازیگر: <b>${cleanedName}</b>\n` +
+        `🔢 تعداد تصاویر: <b>${images.length} تصویر</b> (صفحه ${page})\n\n` +
+        `برای انتخاب، روی شماره مورد نظر ضربه بزنید:\n` +
+        `<i>(همچنین می‌توانید هر عکسی از گالری ارسال کنید)</i>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      }
+    );
+  } catch (err) {
+    logger.error(`Error presenting actor thumbnails: ${err.message}`, err);
+    try {
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
+    } catch (_) {}
+    state.step = "waiting_post_thumbnail";
+    await ctx.reply(
+      `⚠️ خطا در جستجوی تصاویر بازیگر: ${err.message}\nلطفاً عکس یا بنر مورد نظر را ارسال فرمایید.`,
+      { reply_markup: buildCancelKeyboard() }
+    );
+  }
 }
 
 /**
@@ -167,19 +317,37 @@ async function processVideoDownloadAndUpload(ctx, state, statusMsg, downloadOpti
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
     } catch (_) {}
 
-    state.step = "waiting_post_photo";
-    const hasCaption = Boolean(state.data.caption && state.data.caption.trim());
-    await ctx.reply(
-      `<b>ویدیو با موفقیت دانلود و در آرشیو ثبت شد!</b>\n` +
-        `حجم: <b>${formatBytes(downloadResult.size)}</b>\n\n` +
-        (hasCaption ? `<i>✅ کپشن پست به صورت خودکار بر اساس اطلاعات ویدیو آماده شد.</i>\n\n` : "") +
-        `<b>مرحله دوم:</b> لطفاً <b>عکس یا بنر پست کانال</b> را ارسال کنید.\n` +
-        `<i>(ثامبنیل دستی طبق انتخاب شما روی کانال پست خواهد شد)</i>`,
-      {
-        parse_mode: "HTML",
-        reply_markup: buildCancelKeyboard(),
-      }
-    );
+    const targetActor = state.data.actorName || state.data.scrapedMetadata?.actors?.[0];
+
+    if (targetActor) {
+      state.data.actorName = targetActor;
+      state.data.actorIndex = 0;
+      await ctx.reply(
+        `<b>ویدیو با موفقیت دانلود و در آرشیو ثبت شد!</b>\n` +
+          `حجم: <b>${formatBytes(downloadResult.size)}</b>\n` +
+          `👤 بازیگر شناسایی‌شده: <b>${targetActor}</b>\n\n` +
+          (state.data.caption ? `<i>✅ کپشن پست به صورت خودکار بر اساس اطلاعات ویدیو آماده شد.</i>\n\n` : "") +
+          `<b>مرحله دوم: جستجو و انتخاب ثامبنیل خودکار</b>`,
+        { parse_mode: "HTML" }
+      );
+      await presentActorThumbnails(ctx, state, targetActor, 1);
+    } else {
+      state.step = "waiting_post_thumbnail";
+      const hasCaption = Boolean(state.data.caption && state.data.caption.trim());
+      await ctx.reply(
+        `<b>ویدیو با موفقیت دانلود و در آرشیو ثبت شد!</b>\n` +
+          `حجم: <b>${formatBytes(downloadResult.size)}</b>\n\n` +
+          (hasCaption ? `<i>✅ کپشن پست به صورت خودکار بر اساس اطلاعات ویدیو آماده شد.</i>\n\n` : "") +
+          `⚠️ <b>نام بازیگر به صورت خودکار شناسایی نشد.</b>\n\n` +
+          `<b>مرحله دوم (ثامبنیل):</b>\n` +
+          `• <b>نام بازیگر</b> را بنویسید تا عکس‌هایش جستجو شود.\n` +
+          `• یا مستقیماً <b>عکس یا بنر پست</b> را از گالری ارسال فرمایید.`,
+        {
+          parse_mode: "HTML",
+          reply_markup: buildCancelKeyboard(),
+        }
+      );
+    }
   } catch (err) {
     if (abortController.signal.aborted || err.message?.includes("aborted")) {
       logger.info(`Operation gracefully cancelled for [${state.data?.code}]`);
@@ -280,7 +448,10 @@ function registerPostHandler(bot) {
     const userId = ctx.from.id;
     const state = getPostState(userId);
 
-    if (!state || state.step !== "waiting_post_photo") {
+    if (
+      !state ||
+      (state.step !== "waiting_post_photo" && state.step !== "waiting_post_thumbnail")
+    ) {
       return next();
     }
 
@@ -324,12 +495,13 @@ function registerPostHandler(bot) {
 
     state.data.fileId = ctx.message.video.file_id;
     state.data.videoTitle = ctx.message.caption || "Telegram Video";
-    state.step = "waiting_post_photo";
+    state.step = "waiting_post_thumbnail";
 
     await ctx.reply(
       "<b>ویدیو مستقیماً از تلگرام ثبت شد!</b>\n\n" +
-        "<b>مرحله دوم:</b> لطفاً <b>عکس یا بنر پست</b> را ارسال کنید.\n" +
-        "<i>(این عکس به عنوان پست نهایی در کانال قرار می‌گیرد)</i>",
+        "<b>مرحله دوم (ثامبنیل):</b>\n" +
+        "• <b>نام بازیگر</b> را بنویسید تا عکس‌هایش جستجو شود.\n" +
+        "• یا مستقیماً <b>عکس یا بنر پست</b> را ارسال فرمایید.",
       {
         parse_mode: "HTML",
         reply_markup: buildCancelKeyboard(),
@@ -418,6 +590,10 @@ function registerPostHandler(bot) {
           state.data.code,
           defaultQuality?.label
         );
+        if (Array.isArray(metadata.actors) && metadata.actors.length > 0) {
+          state.data.actorName = metadata.actors[0];
+          state.data.actorIndex = 0;
+        }
       }
 
       await processVideoDownloadAndUpload(ctx, state, statusMsg, {
@@ -425,6 +601,20 @@ function registerPostHandler(bot) {
         formatId: defaultQuality?.formatId,
         sizeBytes: defaultQuality?.sizeBytes,
       });
+      return;
+    }
+
+    // Step: Custom actor name search
+    if (state.step === "waiting_custom_actor_name") {
+      const customName = ctx.message.text.trim();
+      await presentActorThumbnails(ctx, state, customName, 1);
+      return;
+    }
+
+    // Step: While waiting for thumbnail, admin typed a text (actor name)
+    if (state.step === "waiting_post_thumbnail") {
+      const actorName = ctx.message.text.trim();
+      await presentActorThumbnails(ctx, state, actorName, 1);
       return;
     }
 
@@ -521,10 +711,16 @@ function registerPostHandler(bot) {
     const state = getPostState(userId);
 
     if (!state) return;
-    state.step = "waiting_post_photo";
 
+    if (state.data.actorName) {
+      await presentActorThumbnails(ctx, state, state.data.actorName, 1);
+      return;
+    }
+
+    state.step = "waiting_post_thumbnail";
     await ctx.reply(
-      "<b>تغییر تصویر پست:</b>\nلطفاً عکس جدید مورد نظرتان را ارسال کنید:",
+      "<b>تغییر تصویر پست:</b>\n" +
+        "می‌توانید <b>نام بازیگر</b> را بنویسید تا عکس‌های جدیدش جستجو شود، یا <b>عکس جدید</b> را از گالری ارسال فرمایید:",
       {
         parse_mode: "HTML",
         reply_markup: buildCancelKeyboard(),
@@ -564,6 +760,10 @@ function registerPostHandler(bot) {
         state.data.code,
         selected?.label
       );
+      if (Array.isArray(metadata.actors) && metadata.actors.length > 0) {
+        state.data.actorName = metadata.actors[0];
+        state.data.actorIndex = 0;
+      }
     }
 
     const statusMsg = { message_id: ctx.callbackQuery.message.message_id };
@@ -606,6 +806,144 @@ function registerPostHandler(bot) {
     } catch (_) {
       await ctx.reply("❌ عملیات لغو گردید.");
     }
+  });
+
+  // Select thumbnail from searched images
+  bot.callbackQuery(/^post_thumb_sel_(\d+)$/, async (ctx) => {
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+
+    if (!state || !state.data?.searchedImages) {
+      await ctx.answerCallbackQuery({
+        text: "اطلاعات منقضی شده است. لطفاً دستور /post را مجدداً ارسال کنید.",
+      });
+      return;
+    }
+
+    const selNum = parseInt(ctx.match[1], 10);
+    const idx = selNum - 1;
+    const chosen = state.data.searchedImages[idx];
+
+    if (!chosen) {
+      await ctx.answerCallbackQuery({ text: "تصویر یافت نشد." });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: `✅ عکس شماره ${selNum} انتخاب شد!` });
+
+    // If file_id is already cached from album
+    if (chosen.fileId) {
+      state.data.photoFileId = chosen.fileId;
+    } else {
+      // Fallback: send photo to get file_id
+      try {
+        const sent = await ctx.replyWithPhoto(chosen.highResUrl, {
+          caption: `✅ ثامبنیل انتخابی: عکس شماره ${selNum}`,
+        });
+        state.data.photoFileId = sent.photo[sent.photo.length - 1].file_id;
+      } catch (_) {
+        const buf = await imageSearch.fetchImageBuffer(chosen.highResUrl, chosen.thumbUrl);
+        if (buf) {
+          const sent = await ctx.replyWithPhoto(new InputFile(buf), {
+            caption: `✅ ثامبنیل انتخابی: عکس شماره ${selNum}`,
+          });
+          state.data.photoFileId = sent.photo[sent.photo.length - 1].file_id;
+        } else {
+          await ctx.reply("خطا در بارگذاری تصویر. لطفاً تصویر دیگری را انتخاب فرمایید.");
+          return;
+        }
+      }
+    }
+
+    // Skip manual caption if already generated
+    if (state.data.caption && state.data.caption.trim()) {
+      await sendPostPreview(ctx, state);
+      return;
+    }
+
+    state.step = "waiting_post_caption";
+    await ctx.reply(
+      "<b>تصویر ثامبنیل با موفقیت تنظیم شد!</b>\n\n" +
+        "<b>مرحله سوم:</b> لطفاً <b>متن کپشن پست</b> را بنویسید و ارسال کنید:",
+      {
+        parse_mode: "HTML",
+        reply_markup: buildCancelKeyboard(),
+      }
+    );
+  });
+
+  // Next 10 images
+  bot.callbackQuery("post_thumb_next", async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "در حال دریافت تصاویر بعدی..." });
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+    if (!state || !state.data?.actorName) return;
+
+    const nextPage = (state.data.imagePage || 1) + 1;
+    await presentActorThumbnails(ctx, state, state.data.actorName, nextPage);
+  });
+
+  // Previous 10 images
+  bot.callbackQuery("post_thumb_prev", async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "در حال بازگشت به صفحه قبل..." });
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+    if (!state || !state.data?.actorName) return;
+
+    const prevPage = Math.max(1, (state.data.imagePage || 1) - 1);
+    await presentActorThumbnails(ctx, state, state.data.actorName, prevPage);
+  });
+
+  // Switch to another actor detected in video metadata
+  bot.callbackQuery(/^post_thumb_actor_(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+    const actorIdx = parseInt(ctx.match[1], 10);
+    const actors = state?.data?.scrapedMetadata?.actors || [];
+    const targetActor = actors[actorIdx];
+    if (!targetActor) return;
+
+    state.data.actorName = targetActor;
+    state.data.actorIndex = actorIdx;
+    await presentActorThumbnails(ctx, state, targetActor, 1);
+  });
+
+  // Custom actor name search button
+  bot.callbackQuery("post_thumb_search_name", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+    if (!state) return;
+
+    state.step = "waiting_custom_actor_name";
+    await ctx.reply(
+      "🔍 <b>جستجوی نام دلخواه:</b>\n\n" +
+        "لطفاً <b>نام بازیگر مورد نظر</b> را تایپ و ارسال کنید:\n" +
+        "<i>(ترجیحاً نام انگلیسی بازیگر)</i>",
+      {
+        parse_mode: "HTML",
+        reply_markup: buildCancelKeyboard(),
+      }
+    );
+  });
+
+  // Manual photo upload prompt
+  bot.callbackQuery("post_thumb_manual", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const userId = ctx.from.id;
+    const state = getPostState(userId);
+    if (!state) return;
+
+    state.step = "waiting_post_photo";
+    await ctx.reply(
+      "📤 <b>ارسال دستی عکس:</b>\n" +
+        "لطفاً تصویر مورد نظر خود را از گالری ارسال فرمایید:",
+      {
+        parse_mode: "HTML",
+        reply_markup: buildCancelKeyboard(),
+      }
+    );
   });
 }
 
